@@ -1,0 +1,81 @@
+{
+  "guildId": "GUILD_ID_PLACEHOLDER",
+  "roles": [
+    {
+      "logical": "Founder",
+      "name": "Founder",
+      "position": 4,
+      "permissions": ["ADMINISTRATOR"]
+    },
+    {
+      "logical": "Team Kosmo",
+      "name": "Team Kosmo",
+      "position": 3,
+      "permissions": ["MANAGE_GUILD", "MANAGE_CHANNELS", "MANAGE_ROLES"]
+    },
+    {
+      "logical": "Admin",
+      "name": "Admin",
+      "position": 2,
+      "permissions": ["MANAGE_MESSAGES", "BAN_MEMBERS"]
+    },
+    {
+      "logical": "Moderator",
+      "name": "Moderator",
+      "position": 1,
+      "permissions": ["KICK_MEMBERS", "MANAGE_MESSAGES"]
+    }
+  ],
+  "channels": [
+    { "name": "Community", "type": "GUILD_CATEGORY" },
+    { "name": "rules", "type": "GUILD_TEXT", "parent": "Community", "permissionTemplate": "PUBLIC_READONLY" },
+    { "name": "announcements", "type": "GUILD_TEXT", "parent": "Community", "permissionTemplate": "PUBLIC_READONLY" },
+    { "name": "general", "type": "GUILD_TEXT", "parent": "Community", "permissionTemplate": "PUBLIC" },
+    { "name": "off-topic", "type": "GUILD_TEXT", "parent": "Community", "permissionTemplate": "PUBLIC" },
+    { "name": "Team Kosmo", "type": "GUILD_CATEGORY" },
+    { "name": "team-chat", "type": "GUILD_TEXT", "parent": "Team Kosmo", "permissionTemplate": "GUILD_ROLE_GATED" },
+    { "name": "voice-lobby", "type": "GUILD_VOICE", "parent": "Team Kosmo", "permissionTemplate": "GUILD_ROLE_GATED" },
+    { "name": "logs", "type": "GUILD_TEXT", "parent": "Community", "permissionTemplate": "PUBLIC_READONLY" },
+    { "name": "tickets", "type": "GUILD_TEXT", "parent": "Community", "permissionTemplate": "TICKET_PRIVATE" },
+    { "name": "bot-commands", "type": "GUILD_TEXT", "parent": "Community", "permissionTemplate": "BOT_SYSTEM" }
+  ],
+  "permissionTemplates": [
+    {
+      "name": "PUBLIC_READONLY",
+      "overwrites": [
+        { "id": "role:Everyone", "allow": ["VIEW_CHANNEL", "READ_MESSAGE_HISTORY"], "deny": ["SEND_MESSAGES"] }
+      ]
+    },
+    {
+      "name": "PUBLIC",
+      "overwrites": []
+    },
+    {
+      "name": "GUILD_ROLE_GATED",
+      "overwrites": [
+        { "id": "role:Team Kosmo", "allow": ["VIEW_CHANNEL", "SEND_MESSAGES", "CONNECT", "SPEAK"], "deny": [] },
+        { "id": "role:Moderator", "allow": ["VIEW_CHANNEL", "SEND_MESSAGES", "CONNECT", "SPEAK"], "deny": [] },
+        { "id": "role:Admin", "allow": ["VIEW_CHANNEL", "SEND_MESSAGES", "CONNECT", "SPEAK"], "deny": [] }
+      ]
+    },
+    {
+      "name": "TICKET_PRIVATE",
+      "overwrites": [
+        { "id": "role:Support", "allow": ["VIEW_CHANNEL", "SEND_MESSAGES"], "deny": [] },
+        { "id": "role:Everyone", "allow": [], "deny": ["VIEW_CHANNEL"] }
+      ]
+    },
+    {
+      "name": "BOT_SYSTEM",
+      "overwrites": [
+        { "id": "role:Bot", "allow": ["VIEW_CHANNEL", "SEND_MESSAGES"], "deny": [] },
+        { "id": "role:Everyone", "allow": [], "deny": ["VIEW_CHANNEL"] }
+      ]
+    }
+  ],
+  "commands": [
+    { "name": "kosmo", "description": "Root command for Kosmo bot", "defaultPermission": true },
+    { "name": "audit", "description": "Run an audit of the Discord server", "defaultPermission": false },
+    { "name": "repair", "description": "Repair server to desired state", "defaultPermission": false }
+  ]
+}
