@@ -86,9 +86,9 @@ export function getHighestRolePosition(member: any): number {
 }
 
 /**
- * Validates target safety and role hierarchy constraints for moderation timeout operations.
+ * Validates target safety and role hierarchy constraints for moderation operations (timeout, kick, etc.).
  */
-export function validateTimeoutTargetSafety(
+export function validateModerationTargetSafety(
   guild: Guild,
   caller: GuildMember,
   target: GuildMember
@@ -143,6 +143,11 @@ export function validateTimeoutTargetSafety(
 }
 
 /**
+ * Backward-compatible alias for timeout target safety checks.
+ */
+export const validateTimeoutTargetSafety = validateModerationTargetSafety;
+
+/**
  * Validate a proposed DiscordAction (Phase 2 legacy signature).
  * Throws an Error if the action would grant a privileged role or permission.
  */
@@ -165,6 +170,21 @@ export function validateAction(guild: Guild, action: DiscordAction): void {
       }
       if (hasPrivilegedRole(member)) {
         throw new Error('Cannot timeout staff members with privileged roles.');
+      }
+    }
+  }
+
+  if (action.type === 'kickMember' && guild) {
+    if (action.payload.targetId === guild.ownerId) {
+      throw new Error('Cannot kick the server owner.');
+    }
+    const member = guild.members.cache?.get?.(action.payload.targetId);
+    if (member) {
+      if (member.user?.bot) {
+        throw new Error('Cannot kick bot accounts.');
+      }
+      if (hasPrivilegedRole(member)) {
+        throw new Error('Cannot kick staff members with privileged roles.');
       }
     }
   }
@@ -296,6 +316,20 @@ export class PermissionValidator {
         const reason = action.payload.reason?.trim() || '';
         if (!reason) {
           errors.push('Timeout reason cannot be empty.');
+        }
+        break;
+      }
+
+      case 'kickMember': {
+        const targetId = action.payload.targetId?.trim() || '';
+        if (!targetId) {
+          errors.push('Target ID cannot be empty for kick.');
+        }
+        const reason = action.payload.reason?.trim() || '';
+        if (!reason) {
+          errors.push('Kick reason cannot be empty.');
+        } else if (reason.length > 512) {
+          errors.push('Kick reason cannot exceed 512 characters.');
         }
         break;
       }

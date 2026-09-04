@@ -134,6 +134,22 @@ export async function runAction(guild: Guild, action: DiscordAction): Promise<st
       await member.timeout(ms, reason);
       return `Timed out member ${member.user?.tag || member.displayName || memberId} for ${durationMinutes} minutes.`;
     }
+    case 'kickMember': {
+      const { targetId, reason } = action.payload;
+      const member = await guild.members.fetch(targetId);
+      if (!member) throw new Error(`Member "${targetId}" not found.`);
+      if (member.id === guild.ownerId) {
+        throw new Error('Cannot kick the server owner.');
+      }
+      if (member.user?.bot) {
+        throw new Error('Cannot kick bot accounts.');
+      }
+      if (hasPrivilegedRole(member)) {
+        throw new Error('Cannot kick staff members with privileged roles.');
+      }
+      await member.kick(reason);
+      return `Kicked member ${member.user?.tag || member.displayName || targetId}.`;
+    }
     default:
       throw new Error('Unknown action type');
   }

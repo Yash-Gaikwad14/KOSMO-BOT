@@ -46,6 +46,12 @@ export type TimeoutMemberPayload = {
   reason: string;
 };
 
+export type KickMemberPayload = {
+  guildId: string;
+  targetId: string;
+  reason: string;
+};
+
 export type DiscordAction =
   | { type: 'createRole'; payload: CreateRolePayload }
   | { type: 'createChannel'; payload: CreateChannelPayload }
@@ -55,7 +61,8 @@ export type DiscordAction =
   | { type: 'deleteChannel'; payload: DeleteChannelPayload }
   | { type: 'deleteCategory'; payload: DeleteCategoryPayload }
   | { type: 'deleteRole'; payload: DeleteRolePayload }
-  | { type: 'timeoutMember'; payload: TimeoutMemberPayload };
+  | { type: 'timeoutMember'; payload: TimeoutMemberPayload }
+  | { type: 'kickMember'; payload: KickMemberPayload };
 
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' | 'BLOCKED';
 

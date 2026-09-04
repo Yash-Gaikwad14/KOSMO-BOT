@@ -6,6 +6,7 @@ import * as path from "path";
 import { loadCommands } from "./commands/loader";
 import { registerCommands } from "./commands/register";
 import { handleConfirmationButton } from "./commands/kosmo/manage";
+import { handleModerationButton } from "./commands/moderation/mod";
 
 async function main(): Promise<void> {
   const token = process.env.DISCORD_BOT_TOKEN;
@@ -51,7 +52,11 @@ async function main(): Promise<void> {
     if (interaction.isButton()) {
       try {
         if (!interaction.replied && !interaction.deferred) {
-          await handleConfirmationButton(interaction);
+          if (interaction.customId.startsWith("mod_")) {
+            await handleModerationButton(interaction);
+          } else {
+            await handleConfirmationButton(interaction);
+          }
         }
       } catch (err) {
         console.error("Error handling button interaction:", err);

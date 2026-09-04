@@ -439,4 +439,119 @@ describe('Discord Actions Executor (runAction)', () => {
       );
     });
   });
+
+  describe('kickMember action execution', () => {
+    test('kicks member successfully with reason', async () => {
+      const mockMember = {
+        id: 'user-to-kick',
+        user: { tag: 'Troublemaker#9999', bot: false },
+        roles: { cache: new Map() },
+        kick: jest.fn().mockResolvedValue(undefined),
+      };
+      (mockGuild.members.fetch as jest.Mock).mockResolvedValueOnce(mockMember);
+
+      const action: DiscordAction = {
+        type: 'kickMember',
+        payload: {
+          guildId: 'guild-1',
+          targetId: 'user-to-kick',
+          reason: 'Violation of rule 1',
+        },
+      };
+
+      const result = await runAction(mockGuild, action);
+      expect(result).toBe('Kicked member Troublemaker#9999.');
+      expect(mockMember.kick).toHaveBeenCalledWith('Violation of rule 1');
+    });
+
+    test('rejects kicking the server owner', async () => {
+      const guildWithOwner = {
+        ...mockGuild,
+        ownerId: 'owner-99',
+        members: {
+          fetch: jest.fn().mockResolvedValue({
+            id: 'owner-99',
+            user: { tag: 'Owner#0001', bot: false },
+            roles: { cache: new Map() },
+            kick: jest.fn(),
+          }),
+        },
+      } as unknown as Guild;
+
+      const action: DiscordAction = {
+        type: 'kickMember',
+        payload: {
+          guildId: 'guild-1',
+          targetId: 'owner-99',
+          reason: 'Attempted kick',
+        },
+      };
+
+      await expect(runAction(guildWithOwner, action)).rejects.toThrow('Cannot kick the server owner.');
+    });
+
+    test('rejects kicking a bot account', async () => {
+      const mockBotMember = {
+        id: 'bot-123',
+        user: { tag: 'Bot#0001', bot: true },
+        roles: { cache: new Map() },
+        kick: jest.fn(),
+      };
+      (mockGuild.members.fetch as jest.Mock).mockResolvedValueOnce(mockBotMember);
+
+      const action: DiscordAction = {
+        type: 'kickMember',
+        payload: {
+          guildId: 'guild-1',
+          targetId: 'bot-123',
+          reason: 'Attempted kick',
+        },
+      };
+
+      await expect(runAction(mockGuild, action)).rejects.toThrow('Cannot kick bot accounts.');
+    });
+
+    test('rejects kicking staff members with privileged roles', async () => {
+      const mockStaffMember = {
+        id: 'staff-99',
+        user: { tag: 'Moderator#0001', bot: false },
+        roles: {
+          cache: new Map([['role-mod', { name: 'Moderator' }]]),
+        },
+        kick: jest.fn(),
+      };
+      (mockGuild.members.fetch as jest.Mock).mockResolvedValueOnce(mockStaffMember);
+
+      const action: DiscordAction = {
+        type: 'kickMember',
+        payload: {
+          guildId: 'guild-1',
+          targetId: 'staff-99',
+          reason: 'Attempted kick',
+        },
+      };
+
+      await expect(runAction(mockGuild, action)).rejects.toThrow('Cannot kick staff members with privileged roles.');
+    });
+
+    test('rejects empty targetId or empty reason via validator', async () => {
+      const emptyTargetAction: DiscordAction = {
+        type: 'kickMember',
+        payload: { guildId: 'guild-1', targetId: '   ', reason: 'Valid reason' },
+      };
+      await expect(runAction(mockGuild, emptyTargetAction)).rejects.toThrow(/target id cannot be empty/i);
+
+      const emptyReasonAction: DiscordAction = {
+        type: 'kickMember',
+        payload: { guildId: 'guild-1', targetId: 'user-1', reason: '   ' },
+      };
+      await expect(runAction(mockGuild, emptyReasonAction)).rejects.toThrow(/kick reason cannot be empty/i);
+
+      const tooLongReasonAction: DiscordAction = {
+        type: 'kickMember',
+        payload: { guildId: 'guild-1', targetId: 'user-1', reason: 'a'.repeat(513) },
+      };
+      await expect(runAction(mockGuild, tooLongReasonAction)).rejects.toThrow(/cannot exceed 512 characters/i);
+    });
+  });
 });
