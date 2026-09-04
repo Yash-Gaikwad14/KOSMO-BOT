@@ -188,6 +188,21 @@ export function validateAction(guild: Guild, action: DiscordAction): void {
       }
     }
   }
+
+  if (action.type === 'banMember' && guild) {
+    if (action.payload.targetId === guild.ownerId) {
+      throw new Error('Cannot ban the server owner.');
+    }
+    const member = guild.members.cache?.get?.(action.payload.targetId);
+    if (member) {
+      if (member.user?.bot) {
+        throw new Error('Cannot ban bot accounts.');
+      }
+      if (hasPrivilegedRole(member)) {
+        throw new Error('Cannot ban staff members with privileged roles.');
+      }
+    }
+  }
 }
 
 /**
@@ -330,6 +345,20 @@ export class PermissionValidator {
           errors.push('Kick reason cannot be empty.');
         } else if (reason.length > 512) {
           errors.push('Kick reason cannot exceed 512 characters.');
+        }
+        break;
+      }
+
+      case 'banMember': {
+        const targetId = action.payload.targetId?.trim() || '';
+        if (!targetId) {
+          errors.push('Target ID cannot be empty for ban.');
+        }
+        const reason = action.payload.reason?.trim() || '';
+        if (!reason) {
+          errors.push('Ban reason cannot be empty.');
+        } else if (reason.length > 512) {
+          errors.push('Ban reason cannot exceed 512 characters.');
         }
         break;
       }

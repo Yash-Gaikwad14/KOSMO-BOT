@@ -8,7 +8,7 @@ export interface PendingModAction {
   moderatorId: string;
   targetId: string;
   targetTag: string;
-  actionType: 'KICK';
+  actionType: 'KICK' | 'BAN';
   reason: string;
   status: ModActionStatus;
   createdAt: Date;

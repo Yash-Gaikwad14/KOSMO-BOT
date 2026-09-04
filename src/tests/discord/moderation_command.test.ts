@@ -61,6 +61,7 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
         return member;
       }),
       kick: jest.fn().mockResolvedValue(undefined),
+      ban: jest.fn().mockResolvedValue(undefined),
       ...overrides,
     };
     return member as unknown as GuildMember;
@@ -93,6 +94,9 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
           if (perm === PermissionFlagsBits.KickMembers || perm === 'KickMembers') {
             return botPerm;
           }
+          if (perm === PermissionFlagsBits.BanMembers || perm === 'BanMembers') {
+            return botPerm;
+          }
           return false;
         }),
       },
@@ -102,6 +106,7 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
     (options.channels || []).forEach((c) => channelsMap.set(c.id, c));
 
     const membersStore = new Map<string, GuildMember>();
+    const bansStore = new Map<string, any>();
 
     const guild: any = {
       id: 'guild-123',
@@ -116,6 +121,15 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
           const found = membersStore.get(id);
           if (found) return found;
           throw new Error(`Member "${id}" not found.`);
+        }),
+      },
+      bans: {
+        cache: bansStore,
+        fetch: jest.fn().mockImplementation(async (arg: any) => {
+          const id = typeof arg === 'string' ? arg : arg?.user;
+          const found = bansStore.get(id);
+          if (found) return found;
+          throw new Error(`Ban "${id}" not found.`);
         }),
       },
       channels: {
@@ -256,6 +270,17 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
 
       const userOpt = kickSub.options.find((o: any) => o.name === 'user');
       const reasonOpt = kickSub.options.find((o: any) => o.name === 'reason');
+
+      expect(userOpt?.required).toBe(true);
+      expect(reasonOpt?.required).toBe(true);
+    });
+
+    test('command defines "ban" subcommand with user and reason options', () => {
+      const banSub = data.options.find((opt: any) => opt.name === 'ban') as any;
+      expect(banSub).toBeDefined();
+
+      const userOpt = banSub.options.find((o: any) => o.name === 'user');
+      const reasonOpt = banSub.options.find((o: any) => o.name === 'reason');
 
       expect(userOpt?.required).toBe(true);
       expect(reasonOpt?.required).toBe(true);
@@ -1524,6 +1549,807 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
 
         const action = getPendingModAction(actionId);
         expect(action?.status).toBe('CANCELLED');
+      });
+    });
+  });
+
+  // =========================================================================
+  // PHASE 4D.3A /mod ban TESTS
+  // =========================================================================
+  describe('Phase 4D.3A /mod ban Command & Confirmation Workflow', () => {
+    describe('Preconditions: DM & Bot Permissions', () => {
+      test('rejects execution outside of a guild (DM rejection)', async () => {
+        const { interaction } = createMockInteraction({
+          guild: null,
+          subcommand: 'ban',
+          reason: 'Spamming',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: 'Command must be used in a guild.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects execution when bot lacks BanMembers permission', async () => {
+        const guild = createMockGuild({ botHasPermission: false });
+        const targetUser = createMockUser();
+        const targetMember = createMockMember(targetUser);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Spamming',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ Bot lacks the "Ban Members" permission.',
+          ephemeral: true,
+        });
+      });
+    });
+
+    describe('Authorization & Policy Enforcement', () => {
+      test('rejects unauthorized requester without Category.MODERATE role', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser();
+        const targetMember = createMockMember(targetUser);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          callerRoles: [createMockRole('regular-role', 'Member', 5)],
+          targetUser,
+          targetMember,
+          reason: 'Trolling',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ You are not authorized to use moderation commands.',
+          ephemeral: true,
+        });
+      });
+    });
+
+    describe('Option Validation', () => {
+      test('rejects empty or whitespace-only reason', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser();
+        const targetMember = createMockMember(targetUser);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: '   ',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ A valid reason must be provided for the ban.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects reason exceeding 512 characters', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser();
+        const targetMember = createMockMember(targetUser);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'A'.repeat(513),
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ Ban reason cannot exceed 512 characters.',
+          ephemeral: true,
+        });
+      });
+    });
+
+    describe('Target Safety & Hierarchy Checks', () => {
+      test('rejects banning oneself', async () => {
+        const guild = createMockGuild();
+        const callerUser = { id: 'self-ban-mod-1', username: 'SelfBanMod' };
+        const selfMember = createMockMember(callerUser as any, [
+          createMockRole('mod-role', 'Moderator', 30),
+        ]);
+        (guild.members.cache as Map<string, GuildMember>).set(callerUser.id, selfMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          callerUser,
+          targetUser: callerUser as any,
+          targetMember: selfMember,
+          reason: 'Self ban attempt',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ You cannot moderate yourself.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects banning a bot account', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser({ bot: true });
+        const targetMember = createMockMember(targetUser);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Bot ban attempt',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ Cannot moderate bot accounts.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects banning the server owner', async () => {
+        const guild = createMockGuild({ ownerId: 'guild-owner-ban-777' });
+        const targetUser = createMockUser({ id: 'guild-owner-ban-777' });
+        const targetMember = createMockMember(targetUser);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Owner ban attempt',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ Cannot moderate the server owner.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects banning staff members with privileged roles', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser({ id: 'staff-ban-user-1' });
+        const targetMember = createMockMember(targetUser, [
+          createMockRole('team-kosmo', 'Team Kosmo', 40),
+        ]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Staff ban attempt',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ Cannot moderate staff members with privileged roles.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects banning member with role equal or higher than caller', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser({ id: 'equal-ban-target-1' });
+        const targetMember = createMockMember(targetUser, [
+          createMockRole('veteran-role', 'Veteran', 30),
+        ]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          callerRoles: [createMockRole('mod-role', 'Moderator', 30)],
+          targetUser,
+          targetMember,
+          reason: 'Equal role ban attempt',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ You cannot moderate a member with an equal or higher role than your highest role.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects banning member with role equal or higher than bot', async () => {
+        const guild = createMockGuild({ botRolePosition: 20 });
+        const targetUser = createMockUser({ id: 'above-bot-ban-target-1' });
+        const targetMember = createMockMember(targetUser, [
+          createMockRole('high-role', 'HighRole', 25),
+        ]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          callerRoles: [createMockRole('admin-role', 'Administrator', 35)],
+          targetUser,
+          targetMember,
+          reason: 'Above bot ban attempt',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ The bot cannot moderate a member with an equal or higher role than its highest role.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects banning non-existent target member', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser({ id: 'ghost-ban-user-999' });
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember: null,
+          reason: 'Ghost user ban',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ Member could not be found in this server.',
+          ephemeral: true,
+        });
+      });
+    });
+
+    describe('Interactive Proposal Workflow (No Immediate Mutation)', () => {
+      test('creates pending action and sends confirmation components without banning', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser({ id: 'target-to-ban-1', username: 'Griefer' });
+        const targetMember = createMockMember(targetUser, [createMockRole('member', 'Member', 5)]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const runActionSpy = jest.spyOn(actionsModule, 'runAction');
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Severe server griefing',
+        });
+
+        await execute(interaction as any);
+
+        // Verification: runAction was NOT called yet!
+        expect(runActionSpy).not.toHaveBeenCalled();
+        expect(targetMember.ban).not.toHaveBeenCalled();
+
+        // Verification: Reply contains confirmation embed and buttons
+        const replyData = interaction.getReplyData();
+        expect(replyData.embeds).toBeDefined();
+        const embed = replyData.embeds[0].data;
+        expect(embed.title).toBe('⚠️ CONFIRM MEMBER BAN');
+        expect(embed.description).toContain('Griefer');
+
+        expect(replyData.components).toBeDefined();
+        const actionRow = replyData.components[0];
+        expect(actionRow.components.length).toBe(2);
+        expect(actionRow.components[0].data.label).toBe('Confirm Ban');
+        expect(actionRow.components[1].data.label).toBe('Cancel');
+
+        const confirmCustomId = actionRow.components[0].data.custom_id;
+        expect(confirmCustomId).toMatch(/^mod_ban_confirm_/);
+
+        const cancelCustomId = actionRow.components[1].data.custom_id;
+        expect(cancelCustomId).toMatch(/^mod_ban_cancel_/);
+
+        const actionId = confirmCustomId.replace('mod_ban_confirm_', '');
+        const stored = getPendingModAction(actionId);
+        expect(stored).toBeDefined();
+        expect(stored?.status).toBe('PENDING');
+        expect(stored?.actionType).toBe('BAN');
+        expect(stored?.reason).toBe('Severe server griefing');
+        expect(stored?.targetId).toBe(targetUser.id);
+        expect(stored?.guildId).toBe(guild.id);
+        expect(stored?.moderatorId).toBe('mod-caller-1');
+        expect(stored?.expiresAt.getTime()).toBeGreaterThan(Date.now());
+      });
+    });
+
+    describe('Confirmation Button Click Handling', () => {
+      test('rejects button click outside a guild', async () => {
+        const buttonInteraction = createMockButtonInteraction({
+          customId: 'mod_ban_confirm_test-id',
+          guild: null,
+        });
+
+        await handleModerationButton(buttonInteraction as any);
+
+        expect(buttonInteraction.reply).toHaveBeenCalledWith({
+          content: '❌ Moderation confirmation can only be performed within a server.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects button click for non-existent or expired action', async () => {
+        const guild = createMockGuild();
+        const buttonInteraction = createMockButtonInteraction({
+          customId: 'mod_ban_confirm_non-existent-action',
+          guild,
+        });
+
+        await handleModerationButton(buttonInteraction as any);
+
+        expect(buttonInteraction.reply).toHaveBeenCalledWith({
+          content: '❌ Moderation action not found or expired.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects confirmation from a user other than the initiating moderator', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser({ id: 'target-ban-diff-user' });
+        const targetMember = createMockMember(targetUser, [createMockRole('member', 'Member', 5)]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Griefing',
+        });
+        await execute(interaction as any);
+
+        const actionRow = interaction.getReplyData().components[0];
+        const confirmCustomId = actionRow.components[0].data.custom_id;
+
+        const imposterInteraction = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'other-mod-99', username: 'OtherMod' },
+        });
+
+        await handleModerationButton(imposterInteraction as any);
+
+        expect(imposterInteraction.reply).toHaveBeenCalledWith({
+          content: '❌ Only the moderator who initiated this action can confirm or cancel it.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects confirmation if moderator lost Category.MODERATE authorization', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser({ id: 'target-ban-demote' });
+        const targetMember = createMockMember(targetUser, [createMockRole('member', 'Member', 5)]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Rule violation',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+
+        const demotedModerator = createMockMember(
+          { id: 'mod-caller-1', username: 'ModCaller' } as any,
+          [createMockRole('regular-member', 'Member', 5)]
+        );
+
+        const demotedInteraction = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+          member: demotedModerator,
+        });
+
+        await handleModerationButton(demotedInteraction as any);
+
+        expect(demotedInteraction.reply).toHaveBeenCalledWith({
+          content: '❌ You are no longer authorized to execute moderation commands.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects confirmation if bot lacks BanMembers permission', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser({ id: 'target-ban-no-bot-perm' });
+        const targetMember = createMockMember(targetUser, [createMockRole('member', 'Member', 5)]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Rule violation',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+
+        // Bot loses BanMembers permission
+        (guild.members.me as any).permissions.has = jest.fn().mockReturnValue(false);
+
+        const buttonInteraction = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(buttonInteraction as any);
+
+        expect(buttonInteraction.reply).toHaveBeenCalledWith({
+          content: '❌ Bot lacks the "Ban Members" permission.',
+          ephemeral: true,
+        });
+      });
+
+      test('aborts ban if target member left server before confirmation', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser({ id: 'target-ban-leaving' });
+        const targetMember = createMockMember(targetUser, [createMockRole('member', 'Member', 5)]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Leaving soon',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+
+        // Target leaves server before confirmation
+        (guild.members.cache as Map<string, GuildMember>).delete(targetUser.id);
+
+        const buttonInteraction = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(buttonInteraction as any);
+
+        const updateData = buttonInteraction.getUpdateData();
+        expect(updateData.embeds[0].data.title).toBe('❌ BAN ABORTED');
+        expect(updateData.embeds[0].data.description).toContain('no longer in this server');
+        expect(updateData.components).toEqual([]);
+      });
+
+      test('aborts ban if target safety fails at confirmation time (e.g. promoted to staff)', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser({ id: 'target-ban-promoted' });
+        const targetMember = createMockMember(targetUser, [createMockRole('member', 'Member', 5)]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Pre-promotion offense',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+
+        // Target promoted to Moderator before confirmation is clicked
+        targetMember.roles.cache.set('mod-role', createMockRole('mod-role', 'Moderator', 30));
+
+        const buttonInteraction = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(buttonInteraction as any);
+
+        const updateData = buttonInteraction.getUpdateData();
+        expect(updateData.embeds[0].data.title).toBe('❌ BAN ABORTED');
+        expect(updateData.embeds[0].data.description).toContain('Target safety validation failed');
+        expect(updateData.components).toEqual([]);
+      });
+
+      test('successful ban: executes through actions.ts:runAction(), verifies ban, logs to #mod-logs, and marks EXECUTED', async () => {
+        const modLogsChannel: any = {
+          id: 'mod-logs-chan',
+          name: 'mod-logs',
+          type: ChannelType.GuildText,
+          send: jest.fn().mockResolvedValue(undefined),
+        };
+
+        const guild = createMockGuild({ channels: [modLogsChannel] });
+        const targetUser = createMockUser({ id: 'confirmed-ban-target', username: 'PermBanned' });
+        const targetMember = createMockMember(targetUser, [createMockRole('member', 'Member', 5)]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        // When ban is called, update bans and members store so verification succeeds
+        targetMember.ban = jest.fn().mockImplementation(async (opts?: any) => {
+          (guild.bans as any).cache.set(targetUser.id, { user: targetUser, reason: opts?.reason });
+          (guild.members.cache as Map<string, GuildMember>).delete(targetUser.id);
+        });
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Severe persistent violations',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+        const actionId = confirmCustomId.replace('mod_ban_confirm_', '');
+
+        const buttonInteraction = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(buttonInteraction as any);
+
+        // Verify ban execution
+        expect(targetMember.ban).toHaveBeenCalledWith({ reason: 'Severe persistent violations' });
+
+        // Verify #mod-logs received embed
+        expect(modLogsChannel.send).toHaveBeenCalledTimes(1);
+        const logEmbed = modLogsChannel.send.mock.calls[0][0].embeds[0].data;
+        expect(logEmbed.title).toBe('🛡️ Member Banned');
+        expect(logEmbed.fields).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ name: 'Action', value: '`BAN`' }),
+            expect.objectContaining({ name: 'Reason', value: 'Severe persistent violations' }),
+          ])
+        );
+
+        // Verify message update to caller
+        const updateData = buttonInteraction.getUpdateData();
+        expect(updateData.embeds[0].data.title).toBe('🔨 Member Banned');
+        expect(updateData.embeds[0].data.description).toContain('Successfully banned');
+        expect(updateData.components).toEqual([]);
+
+        // Invariant: action is marked EXECUTED
+        const completedAction = getPendingModAction(actionId);
+        expect(completedAction?.status).toBe('EXECUTED');
+      });
+
+      test('reports unverified if target is still present and ban entry missing after ban API call', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser({ id: 'ghost-ban-target', username: 'StillPresent' });
+        const targetMember = createMockMember(targetUser, [createMockRole('member', 'Member', 5)]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        // Mock ban that fails to record ban or remove member
+        targetMember.ban = jest.fn().mockResolvedValue(undefined);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Testing unverified ban',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+        const actionId = confirmCustomId.replace('mod_ban_confirm_', '');
+
+        const buttonInteraction = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(buttonInteraction as any);
+
+        const updateData = buttonInteraction.getUpdateData();
+        expect(updateData.embeds[0].data.title).toBe('❌ BAN UNVERIFIED');
+        expect(updateData.embeds[0].data.description).toContain('could not be verified as banned');
+
+        // Action must NOT be EXECUTED
+        const action = getPendingModAction(actionId);
+        expect(action?.status).not.toBe('EXECUTED');
+      });
+
+      test('moderation still succeeds when #mod-logs channel is absent', async () => {
+        const guild = createMockGuild({ channels: [] });
+        const targetUser = createMockUser({ id: 'ban-no-log-target', username: 'NoLog' });
+        const targetMember = createMockMember(targetUser, [createMockRole('member', 'Member', 5)]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        targetMember.ban = jest.fn().mockImplementation(async () => {
+          (guild.members.cache as Map<string, GuildMember>).delete(targetUser.id);
+        });
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'No log channel test',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+        const actionId = confirmCustomId.replace('mod_ban_confirm_', '');
+
+        const buttonInteraction = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(buttonInteraction as any);
+
+        const updateData = buttonInteraction.getUpdateData();
+        expect(updateData.embeds[0].data.title).toBe('🔨 Member Banned');
+        const completedAction = getPendingModAction(actionId);
+        expect(completedAction?.status).toBe('EXECUTED');
+      });
+
+      test('replay protection: cannot confirm already processed action', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser({ id: 'target-ban-replay' });
+        const targetMember = createMockMember(targetUser, [createMockRole('member', 'Member', 5)]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        targetMember.ban = jest.fn().mockImplementation(async () => {
+          (guild.members.cache as Map<string, GuildMember>).delete(targetUser.id);
+        });
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Ban replay test',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+
+        const firstClick = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+        await handleModerationButton(firstClick as any);
+
+        // Second click on the same button
+        const secondClick = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+        await handleModerationButton(secondClick as any);
+
+        expect(secondClick.reply).toHaveBeenCalledWith(
+          expect.objectContaining({
+            content: expect.stringMatching(/already been executed/i),
+            ephemeral: true,
+          })
+        );
+      });
+    });
+
+    describe('Cancellation Workflow', () => {
+      test('cancels action when moderator clicks Cancel', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser({ id: 'target-to-cancel-ban', username: 'SparedMember' });
+        const targetMember = createMockMember(targetUser, [createMockRole('member', 'Member', 5)]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Accidental ban proposal',
+        });
+        await execute(interaction as any);
+
+        const cancelCustomId = interaction.getReplyData().components[0].components[1].data.custom_id;
+        const actionId = cancelCustomId.replace('mod_ban_cancel_', '');
+
+        const buttonInteraction = createMockButtonInteraction({
+          customId: cancelCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(buttonInteraction as any);
+
+        expect(targetMember.ban).not.toHaveBeenCalled();
+
+        const updateData = buttonInteraction.getUpdateData();
+        expect(updateData.embeds[0].data.title).toBe('🚫 BAN CANCELLED');
+        expect(updateData.embeds[0].data.description).toContain('SparedMember');
+        expect(updateData.components).toEqual([]);
+
+        const action = getPendingModAction(actionId);
+        expect(action?.status).toBe('CANCELLED');
+      });
+
+      test('cancelled confirmation cannot be executed', async () => {
+        const guild = createMockGuild();
+        const targetUser = createMockUser({ id: 'target-cancelled-exec' });
+        const targetMember = createMockMember(targetUser, [createMockRole('member', 'Member', 5)]);
+        (guild.members.cache as Map<string, GuildMember>).set(targetUser.id, targetMember);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'ban',
+          targetUser,
+          targetMember,
+          reason: 'Cancel then confirm attempt',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+        const cancelCustomId = interaction.getReplyData().components[0].components[1].data.custom_id;
+
+        // First click Cancel
+        const cancelClick = createMockButtonInteraction({
+          customId: cancelCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+        await handleModerationButton(cancelClick as any);
+
+        // Attempt Confirm
+        const confirmClick = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+        await handleModerationButton(confirmClick as any);
+
+        expect(confirmClick.reply).toHaveBeenCalledWith(
+          expect.objectContaining({
+            content: expect.stringMatching(/has already been cancelled/i),
+            ephemeral: true,
+          })
+        );
+        expect(targetMember.ban).not.toHaveBeenCalled();
       });
     });
   });

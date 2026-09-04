@@ -150,6 +150,22 @@ export async function runAction(guild: Guild, action: DiscordAction): Promise<st
       await member.kick(reason);
       return `Kicked member ${member.user?.tag || member.displayName || targetId}.`;
     }
+    case 'banMember': {
+      const { targetId, reason } = action.payload;
+      const member = await guild.members.fetch(targetId);
+      if (!member) throw new Error(`Member "${targetId}" not found.`);
+      if (member.id === guild.ownerId) {
+        throw new Error('Cannot ban the server owner.');
+      }
+      if (member.user?.bot) {
+        throw new Error('Cannot ban bot accounts.');
+      }
+      if (hasPrivilegedRole(member)) {
+        throw new Error('Cannot ban staff members with privileged roles.');
+      }
+      await member.ban({ reason });
+      return `Banned member ${member.user?.tag || member.displayName || targetId}.`;
+    }
     default:
       throw new Error('Unknown action type');
   }

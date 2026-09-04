@@ -554,4 +554,119 @@ describe('Discord Actions Executor (runAction)', () => {
       await expect(runAction(mockGuild, tooLongReasonAction)).rejects.toThrow(/cannot exceed 512 characters/i);
     });
   });
+
+  describe('banMember action execution', () => {
+    test('bans member successfully with reason passed to Discord', async () => {
+      const mockMember = {
+        id: 'user-to-ban',
+        user: { tag: 'BannedUser#9999', bot: false },
+        roles: { cache: new Map() },
+        ban: jest.fn().mockResolvedValue(undefined),
+      };
+      (mockGuild.members.fetch as jest.Mock).mockResolvedValueOnce(mockMember);
+
+      const action: DiscordAction = {
+        type: 'banMember',
+        payload: {
+          guildId: 'guild-1',
+          targetId: 'user-to-ban',
+          reason: 'Severe violation',
+        },
+      };
+
+      const result = await runAction(mockGuild, action);
+      expect(result).toBe('Banned member BannedUser#9999.');
+      expect(mockMember.ban).toHaveBeenCalledWith({ reason: 'Severe violation' });
+    });
+
+    test('rejects banning the server owner', async () => {
+      const guildWithOwner = {
+        ...mockGuild,
+        ownerId: 'owner-ban-99',
+        members: {
+          fetch: jest.fn().mockResolvedValue({
+            id: 'owner-ban-99',
+            user: { tag: 'Owner#0001', bot: false },
+            roles: { cache: new Map() },
+            ban: jest.fn(),
+          }),
+        },
+      } as unknown as Guild;
+
+      const action: DiscordAction = {
+        type: 'banMember',
+        payload: {
+          guildId: 'guild-1',
+          targetId: 'owner-ban-99',
+          reason: 'Attempted ban',
+        },
+      };
+
+      await expect(runAction(guildWithOwner, action)).rejects.toThrow('Cannot ban the server owner.');
+    });
+
+    test('rejects banning a bot account', async () => {
+      const mockBotMember = {
+        id: 'bot-ban-123',
+        user: { tag: 'Bot#0001', bot: true },
+        roles: { cache: new Map() },
+        ban: jest.fn(),
+      };
+      (mockGuild.members.fetch as jest.Mock).mockResolvedValueOnce(mockBotMember);
+
+      const action: DiscordAction = {
+        type: 'banMember',
+        payload: {
+          guildId: 'guild-1',
+          targetId: 'bot-ban-123',
+          reason: 'Attempted ban',
+        },
+      };
+
+      await expect(runAction(mockGuild, action)).rejects.toThrow('Cannot ban bot accounts.');
+    });
+
+    test('rejects banning staff members with privileged roles', async () => {
+      const mockStaffMember = {
+        id: 'staff-ban-99',
+        user: { tag: 'Moderator#0001', bot: false },
+        roles: {
+          cache: new Map([['role-mod', { name: 'Moderator' }]]),
+        },
+        ban: jest.fn(),
+      };
+      (mockGuild.members.fetch as jest.Mock).mockResolvedValueOnce(mockStaffMember);
+
+      const action: DiscordAction = {
+        type: 'banMember',
+        payload: {
+          guildId: 'guild-1',
+          targetId: 'staff-ban-99',
+          reason: 'Attempted ban',
+        },
+      };
+
+      await expect(runAction(mockGuild, action)).rejects.toThrow('Cannot ban staff members with privileged roles.');
+    });
+
+    test('rejects empty targetId or empty reason via validator', async () => {
+      const emptyTargetAction: DiscordAction = {
+        type: 'banMember',
+        payload: { guildId: 'guild-1', targetId: '   ', reason: 'Valid reason' },
+      };
+      await expect(runAction(mockGuild, emptyTargetAction)).rejects.toThrow(/target id cannot be empty/i);
+
+      const emptyReasonAction: DiscordAction = {
+        type: 'banMember',
+        payload: { guildId: 'guild-1', targetId: 'user-1', reason: '   ' },
+      };
+      await expect(runAction(mockGuild, emptyReasonAction)).rejects.toThrow(/ban reason cannot be empty/i);
+
+      const tooLongReasonAction: DiscordAction = {
+        type: 'banMember',
+        payload: { guildId: 'guild-1', targetId: 'user-1', reason: 'a'.repeat(513) },
+      };
+      await expect(runAction(mockGuild, tooLongReasonAction)).rejects.toThrow(/cannot exceed 512 characters/i);
+    });
+  });
 });
