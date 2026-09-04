@@ -14,7 +14,11 @@ const mockGuild = {
   },
   members: {
     fetch: jest.fn().mockResolvedValue({
-      roles: { cache: new Map(), add: jest.fn().mockResolvedValue(undefined) },
+      roles: {
+        cache: new Map(),
+        add: jest.fn().mockResolvedValue(undefined),
+        remove: jest.fn().mockResolvedValue(undefined),
+      },
       user: { tag: 'User#1234' },
     }),
   },
@@ -187,5 +191,154 @@ describe('Discord Actions Executor (runAction)', () => {
       'Category "KOSMO Testing" not found in server.'
     );
     expect(mockGuild.channels.create).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 4B.1 Member Role Execution (assignRole / removeRole)
+  // -------------------------------------------------------------------------
+  test('assignRole adds role when member does not have it', async () => {
+    const mockRole = { id: 'role-comm', name: 'Community Member' };
+    (mockGuild.roles.cache as any).set('role-comm', mockRole);
+
+    const mockMember = {
+      roles: {
+        cache: new Map(),
+        add: jest.fn().mockResolvedValue(undefined),
+      },
+      user: { tag: 'TestUser#0001' },
+    };
+    (mockGuild.members.fetch as jest.Mock).mockResolvedValueOnce(mockMember);
+
+    const action: DiscordAction = {
+      type: 'assignRole',
+      payload: { roleName: 'Community Member', memberId: 'user-123' },
+    };
+
+    const msg = await runAction(mockGuild, action);
+    expect(msg).toBe('Assigned role "Community Member" to member TestUser#0001.');
+    expect(mockMember.roles.add).toHaveBeenCalledWith(mockRole);
+  });
+
+  test('assignRole is idempotent when member already has role', async () => {
+    const mockRole = { id: 'role-comm', name: 'Community Member' };
+    (mockGuild.roles.cache as any).set('role-comm', mockRole);
+
+    const memberRoleCache = new Map();
+    memberRoleCache.set('role-comm', mockRole);
+
+    const mockMember = {
+      roles: {
+        cache: memberRoleCache,
+        add: jest.fn().mockResolvedValue(undefined),
+      },
+      user: { tag: 'TestUser#0001' },
+    };
+    (mockGuild.members.fetch as jest.Mock).mockResolvedValueOnce(mockMember);
+
+    const action: DiscordAction = {
+      type: 'assignRole',
+      payload: { roleName: 'Community Member', memberId: 'user-123' },
+    };
+
+    const msg = await runAction(mockGuild, action);
+    expect(msg).toBe('Member already has role "Community Member".');
+    expect(mockMember.roles.add).not.toHaveBeenCalled();
+  });
+
+  test('removeRole removes role when member has it', async () => {
+    const mockRole = { id: 'role-beta', name: 'Beta Tester' };
+    (mockGuild.roles.cache as any).set('role-beta', mockRole);
+
+    const memberRoleCache = new Map();
+    memberRoleCache.set('role-beta', mockRole);
+
+    const mockMember = {
+      roles: {
+        cache: memberRoleCache,
+        remove: jest.fn().mockResolvedValue(undefined),
+      },
+      user: { tag: 'TestUser#0001' },
+    };
+    (mockGuild.members.fetch as jest.Mock).mockResolvedValueOnce(mockMember);
+
+    const action: DiscordAction = {
+      type: 'removeRole',
+      payload: { roleName: 'Beta Tester', memberId: 'user-123' },
+    };
+
+    const msg = await runAction(mockGuild, action);
+    expect(msg).toBe('Removed role "Beta Tester" from member TestUser#0001.');
+    expect(mockMember.roles.remove).toHaveBeenCalledWith(mockRole);
+  });
+
+  test('removeRole is idempotent when member does not have role', async () => {
+    const mockRole = { id: 'role-beta', name: 'Beta Tester' };
+    (mockGuild.roles.cache as any).set('role-beta', mockRole);
+
+    const mockMember = {
+      roles: {
+        cache: new Map(),
+        remove: jest.fn().mockResolvedValue(undefined),
+      },
+      user: { tag: 'TestUser#0001' },
+    };
+    (mockGuild.members.fetch as jest.Mock).mockResolvedValueOnce(mockMember);
+
+    const action: DiscordAction = {
+      type: 'removeRole',
+      payload: { roleName: 'Beta Tester', memberId: 'user-123' },
+    };
+
+    const msg = await runAction(mockGuild, action);
+    expect(msg).toBe('Member does not have role "Beta Tester".');
+    expect(mockMember.roles.remove).not.toHaveBeenCalled();
+  });
+
+  test('missing role fails safely for assignRole and removeRole', async () => {
+    const assignAction: DiscordAction = {
+      type: 'assignRole',
+      payload: { roleName: 'NonExistentRole', memberId: 'user-123' },
+    };
+    await expect(runAction(mockGuild, assignAction)).rejects.toThrow(
+      'Role "NonExistentRole" not found for assignment.'
+    );
+
+    const removeAction: DiscordAction = {
+      type: 'removeRole',
+      payload: { roleName: 'NonExistentRole', memberId: 'user-123' },
+    };
+    await expect(runAction(mockGuild, removeAction)).rejects.toThrow(
+      'Role "NonExistentRole" not found for removal.'
+    );
+  });
+
+  test('missing member fails safely', async () => {
+    const mockRole = { id: 'role-comm', name: 'Community Member' };
+    (mockGuild.roles.cache as any).set('role-comm', mockRole);
+
+    (mockGuild.members.fetch as jest.Mock).mockRejectedValueOnce(
+      new Error('Unknown Member')
+    );
+
+    const action: DiscordAction = {
+      type: 'assignRole',
+      payload: { roleName: 'Community Member', memberId: 'invalid-user' },
+    };
+
+    await expect(runAction(mockGuild, action)).rejects.toThrow('Unknown Member');
+  });
+
+  test('privileged role is rejected by existing validation for assignRole and removeRole', async () => {
+    const assignAction: DiscordAction = {
+      type: 'assignRole',
+      payload: { roleName: 'Founder', memberId: 'user-123' },
+    };
+    await expect(runAction(mockGuild, assignAction)).rejects.toThrow(/privileged role/i);
+
+    const removeAction: DiscordAction = {
+      type: 'removeRole',
+      payload: { roleName: 'Admin', memberId: 'user-123' },
+    };
+    await expect(runAction(mockGuild, removeAction)).rejects.toThrow(/privileged role/i);
   });
 });

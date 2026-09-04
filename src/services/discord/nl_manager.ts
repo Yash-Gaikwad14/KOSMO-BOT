@@ -60,11 +60,16 @@ Supported Action Types & Payloads:
    - Do NOT invent category IDs or Discord IDs. Use the category name string, because the executor resolves parent categories by name.
    - Preserve user-requested category parenting.
 3. assignRole:
-   - "roleName": concrete role name string
-   - "memberId": concrete Discord user ID string
+   - "roleName": concrete role name string (must NOT be a privileged role)
+   - "memberId": concrete Discord member ID string explicitly provided by the user
+   MEMBER ID RULES:
+   - "memberId" must be an actual Discord member ID string explicitly provided in the user instruction.
+   - NEVER invent or fabricate member IDs or role IDs.
+   - If the user refers to a member without an explicit resolvable member ID, do NOT invent one.
 4. removeRole:
-   - "roleName": concrete role name string
-   - "memberId": concrete Discord user ID string
+   - "roleName": concrete role name string (must NOT be a privileged role)
+   - "memberId": concrete Discord member ID string explicitly provided by the user
+   - Follows the same Member ID rules as assignRole.
 5. applyPermissionTemplate:
    - "targetName": concrete channel name string
    - "permissionOverwrites": array of { "id": concrete target ID, "allow": [], "deny": [] }
@@ -79,6 +84,21 @@ Example of VALID output:
       "payload": {
         "name": "test-channel",
         "type": "GUILD_TEXT"
+      }
+    }
+  ]
+}
+
+Example of VALID assignRole setup:
+{
+  "planName": "Assign Role Plan",
+  "explanation": "Assign Community Member role to specified member",
+  "actions": [
+    {
+      "type": "assignRole",
+      "payload": {
+        "roleName": "Community Member",
+        "memberId": "123456789"
       }
     }
   ]
@@ -139,6 +159,8 @@ STRICT SAFETY RULES:
 - NEVER output deletion or destructive actions.
 - NEVER grant "Administrator", "ManageGuild", "KickMembers", or "BanMembers" permissions in permissionOverwrites.
 - NEVER create or assign privileged roles ("Founder", "Team Kosmo", "Moderator", "Administrator", "Admin", "Owner", "KosmoBot").
+- NEVER remove privileged roles ("Founder", "Team Kosmo", "Moderator", "Administrator", "Admin", "Owner", "KosmoBot").
+- NEVER invent member IDs or role IDs.
 - Output pure JSON only. Do not add conversational text or markdown.
 `.trim();
 
@@ -253,6 +275,20 @@ export class NLManager {
             payload.categoryName;
           if (categoryName && typeof categoryName === 'string') {
             payload.category = categoryName.trim();
+          }
+        }
+        if (action.type === 'assignRole' || action.type === 'removeRole') {
+          if (!payload.roleName && payload.role) {
+            payload.roleName = payload.role;
+          }
+          if (!payload.memberId && payload.userId) {
+            payload.memberId = payload.userId;
+          }
+          if (typeof payload.roleName === 'string') {
+            payload.roleName = payload.roleName.trim();
+          }
+          if (typeof payload.memberId === 'string') {
+            payload.memberId = payload.memberId.trim();
           }
         }
         return {

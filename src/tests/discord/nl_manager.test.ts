@@ -1217,4 +1217,255 @@ Hope this helps!`;
       expect(res4.validation.valid).toBe(false);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // TEST 11 — Phase 4B.1 Member Role Management
+  // -------------------------------------------------------------------------
+  describe('TEST 11: Phase 4B.1 Member Role Management', () => {
+    test('11a: Valid assignRole plan produces PROPOSED plan with MEDIUM risk', async () => {
+      const mockOutput = JSON.stringify({
+        planName: 'Assign Community Member Role',
+        explanation: 'Assign the Community Member role to the specified member.',
+        actions: [
+          {
+            type: 'assignRole',
+            payload: {
+              roleName: 'Community Member',
+              memberId: '123456789',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockOutput);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Give the Community Member role to user 123456789.',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.status).toBe('PROPOSED');
+      expect(result.plan?.actions).toHaveLength(1);
+
+      const action = result.plan?.actions[0];
+      expect(action?.type).toBe('assignRole');
+      if (action?.type === 'assignRole') {
+        expect(action.payload.roleName).toBe('Community Member');
+        expect(action.payload.memberId).toBe('123456789');
+      }
+
+      expect(result.validation.valid).toBe(true);
+      expect(result.validation.blocked).toBe(false);
+      expect(result.plan?.riskLevel).toBe('MEDIUM');
+    });
+
+    test('11b: Valid removeRole plan removes non-privileged role without blocking', async () => {
+      const mockOutput = JSON.stringify({
+        planName: 'Remove Beta Tester Role',
+        explanation: 'Remove the Beta Tester role from user 123456789.',
+        actions: [
+          {
+            type: 'removeRole',
+            payload: {
+              roleName: 'Beta Tester',
+              memberId: '123456789',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockOutput);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Remove the Beta Tester role from user 123456789.',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.status).toBe('PROPOSED');
+      expect(result.plan?.actions).toHaveLength(1);
+
+      const action = result.plan?.actions[0];
+      expect(action?.type).toBe('removeRole');
+      if (action?.type === 'removeRole') {
+        expect(action.payload.roleName).toBe('Beta Tester');
+        expect(action.payload.memberId).toBe('123456789');
+      }
+
+      expect(result.validation.valid).toBe(true);
+      expect(result.validation.blocked).toBe(false);
+    });
+
+    test('11c: Privileged role assignment is blocked (Founder)', async () => {
+      const mockOutput = JSON.stringify({
+        planName: 'Assign Founder Role',
+        explanation: 'Attempt to assign Founder role to user 123456789.',
+        actions: [
+          {
+            type: 'assignRole',
+            payload: {
+              roleName: 'Founder',
+              memberId: '123456789',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockOutput);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Make user 123456789 a Founder',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.validation.blocked).toBe(true);
+      expect(result.plan?.riskLevel).toBe('BLOCKED');
+      expect(result.plan?.status).toBe('REJECTED');
+
+      const blockedReasons = result.validation.blockedReasons || [];
+      expect(blockedReasons.some((r) => r.toLowerCase().includes('privileged role'))).toBe(true);
+    });
+
+    test('11d: Privileged role removal is blocked (Admin)', async () => {
+      const mockOutput = JSON.stringify({
+        planName: 'Remove Admin Role',
+        explanation: 'Attempt to remove Admin role from user 123456789.',
+        actions: [
+          {
+            type: 'removeRole',
+            payload: {
+              roleName: 'Admin',
+              memberId: '123456789',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockOutput);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Remove Admin role from user 123456789',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.validation.blocked).toBe(true);
+      expect(result.plan?.riskLevel).toBe('BLOCKED');
+      expect(result.plan?.status).toBe('REJECTED');
+    });
+
+    test('11e: Member ID must not be fabricated; malformed/empty memberId fails safely', async () => {
+      // 1. Empty memberId fails validation
+      const emptyMemberOutput = JSON.stringify({
+        planName: 'Assign Role Empty Member',
+        explanation: 'Assign role with empty memberId',
+        actions: [
+          {
+            type: 'assignRole',
+            payload: {
+              roleName: 'Member',
+              memberId: '',
+            },
+          },
+        ],
+      });
+
+      const manager1 = new NLManager(jest.fn().mockResolvedValue(emptyMemberOutput));
+      const res1 = await manager1.generatePlan('assign role Member to nobody', authorizedContext);
+
+      expect(res1.success).toBe(false);
+      expect(res1.validation.valid).toBe(false);
+      expect(res1.validation.errors).toContain('Member ID cannot be empty for role assignment.');
+
+      // 2. Whitespace-only memberId fails validation
+      const whitespaceMemberOutput = JSON.stringify({
+        planName: 'Remove Role Empty Member',
+        explanation: 'Remove role with whitespace memberId',
+        actions: [
+          {
+            type: 'removeRole',
+            payload: {
+              roleName: 'Member',
+              memberId: '   ',
+            },
+          },
+        ],
+      });
+
+      const manager2 = new NLManager(jest.fn().mockResolvedValue(whitespaceMemberOutput));
+      const res2 = await manager2.generatePlan('remove role Member with bad id', authorizedContext);
+
+      expect(res2.success).toBe(false);
+      expect(res2.validation.valid).toBe(false);
+      expect(res2.validation.errors).toContain('Member ID cannot be empty for role removal.');
+    });
+
+    test('11f: Unsupported action type remains rejected (e.g. banMember)', async () => {
+      const unsupportedOutput = JSON.stringify({
+        planName: 'Ban Member Plan',
+        explanation: 'Attempt to ban user 123456789',
+        actions: [
+          {
+            type: 'banMember',
+            payload: {
+              memberId: '123456789',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(unsupportedOutput);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan('ban user 123456789', authorizedContext);
+
+      expect(result.success).toBe(false);
+      expect(result.validation.valid).toBe(false);
+      expect(result.validation.errors.some((e) => e.includes('Unsupported action type: banMember'))).toBe(true);
+    });
+
+    test('11g: Mixed safe + unsafe member plan is blocked completely', async () => {
+      const mixedOutput = JSON.stringify({
+        planName: 'Mixed Safe and Privileged Role Assignment',
+        explanation: 'Assign Community Member and Founder roles',
+        actions: [
+          {
+            type: 'assignRole',
+            payload: {
+              roleName: 'Community Member',
+              memberId: '123456789',
+            },
+          },
+          {
+            type: 'assignRole',
+            payload: {
+              roleName: 'Founder',
+              memberId: '987654321',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mixedOutput);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Give Community Member to 123456789 and Founder to 987654321',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.validation.blocked).toBe(true);
+      expect(result.plan?.riskLevel).toBe('BLOCKED');
+      expect(result.plan?.status).toBe('REJECTED');
+    });
+  });
 });

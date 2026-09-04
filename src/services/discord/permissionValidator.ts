@@ -81,15 +81,27 @@ export class PermissionValidator {
           blocked = true;
           blockedReasons.push(`Assigning privileged role is not allowed.`);
         }
+        if (!roleName) {
+          errors.push('Role name cannot be empty for assignment.');
+        }
+        if (!action.payload.memberId || !action.payload.memberId.trim()) {
+          errors.push('Member ID cannot be empty for role assignment.');
+        }
         break;
       }
 
       case 'removeRole': {
         const roleName = action.payload.roleName?.trim() || '';
         const lowerName = roleName.toLowerCase();
-        if (['founder', 'owner', 'administrator', 'admin'].includes(lowerName)) {
+        if (PRIVILEGED_ROLE_NAMES.some((p) => p.toLowerCase() === lowerName)) {
           blocked = true;
-          blockedReasons.push(`Removing ultra-privileged role '${roleName}' via AI is not allowed.`);
+          blockedReasons.push(`Removing privileged role '${roleName}' is not allowed.`);
+        }
+        if (!roleName) {
+          errors.push('Role name cannot be empty for removal.');
+        }
+        if (!action.payload.memberId || !action.payload.memberId.trim()) {
+          errors.push('Member ID cannot be empty for role removal.');
         }
         break;
       }

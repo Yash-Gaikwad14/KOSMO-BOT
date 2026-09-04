@@ -62,4 +62,85 @@ describe('PermissionValidator Safety Constraints', () => {
       expect(() => validateAction(mockGuild, action)).toThrow(/Deletion of privileged role/i);
     }
   });
+
+  // Phase 4B Member Role Safety Tests
+  test('allows normal non-privileged role assignment', () => {
+    const action: DiscordAction = {
+      type: 'assignRole',
+      payload: { roleName: 'Community Member', memberId: '123456789' },
+    };
+    const res = PermissionValidator.validateAction(action);
+    expect(res.valid).toBe(true);
+    expect(res.blocked).toBe(false);
+  });
+
+  test('allows normal non-privileged role removal', () => {
+    const action: DiscordAction = {
+      type: 'removeRole',
+      payload: { roleName: 'Beta Tester', memberId: '123456789' },
+    };
+    const res = PermissionValidator.validateAction(action);
+    expect(res.valid).toBe(true);
+    expect(res.blocked).toBe(false);
+  });
+
+  test('blocks Founder role assignment', () => {
+    const action: DiscordAction = {
+      type: 'assignRole',
+      payload: { roleName: 'Founder', memberId: '123456789' },
+    };
+    const res = PermissionValidator.validateAction(action);
+    expect(res.valid).toBe(false);
+    expect(res.blocked).toBe(true);
+    expect(res.blockedReasons?.[0]).toMatch(/privileged role/i);
+    expect(() => validateAction(mockGuild, action)).toThrow(/privileged role/i);
+  });
+
+  test('blocks Admin role assignment', () => {
+    const action: DiscordAction = {
+      type: 'assignRole',
+      payload: { roleName: 'Admin', memberId: '123456789' },
+    };
+    const res = PermissionValidator.validateAction(action);
+    expect(res.valid).toBe(false);
+    expect(res.blocked).toBe(true);
+    expect(res.blockedReasons?.[0]).toMatch(/privileged role/i);
+    expect(() => validateAction(mockGuild, action)).toThrow(/privileged role/i);
+  });
+
+  test('blocks Moderator role assignment', () => {
+    const action: DiscordAction = {
+      type: 'assignRole',
+      payload: { roleName: 'Moderator', memberId: '123456789' },
+    };
+    const res = PermissionValidator.validateAction(action);
+    expect(res.valid).toBe(false);
+    expect(res.blocked).toBe(true);
+    expect(res.blockedReasons?.[0]).toMatch(/privileged role/i);
+    expect(() => validateAction(mockGuild, action)).toThrow(/privileged role/i);
+  });
+
+  test('blocks Founder role removal', () => {
+    const action: DiscordAction = {
+      type: 'removeRole',
+      payload: { roleName: 'Founder', memberId: '123456789' },
+    };
+    const res = PermissionValidator.validateAction(action);
+    expect(res.valid).toBe(false);
+    expect(res.blocked).toBe(true);
+    expect(res.blockedReasons?.[0]).toMatch(/privileged role/i);
+    expect(() => validateAction(mockGuild, action)).toThrow(/privileged role/i);
+  });
+
+  test('blocks Admin role removal', () => {
+    const action: DiscordAction = {
+      type: 'removeRole',
+      payload: { roleName: 'Admin', memberId: '123456789' },
+    };
+    const res = PermissionValidator.validateAction(action);
+    expect(res.valid).toBe(false);
+    expect(res.blocked).toBe(true);
+    expect(res.blockedReasons?.[0]).toMatch(/privileged role/i);
+    expect(() => validateAction(mockGuild, action)).toThrow(/privileged role/i);
+  });
 });
