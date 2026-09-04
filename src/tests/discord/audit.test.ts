@@ -115,13 +115,64 @@ describe('Audit Service', () => {
     expect(report.commands).toHaveLength(1);
     expect(report.commands[0]).toMatchObject({ id: 'cmd1', name: 'ping', description: 'Ping command', defaultPermission: true });
 
-    // Desired‑state config detection result should be a boolean
-    expect(typeof report.hasDesiredStateConfig).toBe('boolean');
+    // Desired‑state config detection result
+    expect(report.hasDesiredStateConfig).toBe(true);
   });
 
   test('unauthorized user triggers policy denial', async () => {
     (authorize as jest.Mock).mockReturnValue('DENY');
     const mockGuild = createMockGuild();
     await expect(runAudit(mockGuild, ['999999999999999999'])).rejects.toThrow('Unauthorized');
+  });
+
+  test('guild owner with no recognized role is authorized (ALLOW audit)', async () => {
+    const mockGuild = createMockGuild();
+    (mockGuild as any).ownerId = 'owner123';
+    (authorize as jest.Mock).mockReturnValue('ALLOW');
+
+    const report = await runAudit(mockGuild, [], 'owner123');
+    expect(report.guild).toEqual({ id: 'guild123', name: 'TestGuild' });
+    expect(authorize).toHaveBeenCalledWith([], 'AUDIT', {
+      userId: 'owner123',
+      guildOwnerId: 'owner123',
+    });
+  });
+
+  test('guild owner with Founder role is authorized (ALLOW audit)', async () => {
+    const mockGuild = createMockGuild();
+    (mockGuild as any).ownerId = 'owner123';
+    (authorize as jest.Mock).mockReturnValue('ALLOW');
+
+    const report = await runAudit(mockGuild, ['111111111111111111'], 'owner123');
+    expect(report.guild).toEqual({ id: 'guild123', name: 'TestGuild' });
+    expect(authorize).toHaveBeenCalledWith(['111111111111111111'], 'AUDIT', {
+      userId: 'owner123',
+      guildOwnerId: 'owner123',
+    });
+  });
+
+  test('non-owner with authorized audit role is authorized via policy', async () => {
+    (authorize as jest.Mock).mockReturnValue('ALLOW');
+    const mockGuild = createMockGuild();
+    (mockGuild as any).ownerId = 'owner123';
+
+    const report = await runAudit(mockGuild, ['111111111111111111'], 'nonowner456');
+    expect(report.guild).toEqual({ id: 'guild123', name: 'TestGuild' });
+    expect(authorize).toHaveBeenCalledWith(['111111111111111111'], 'AUDIT', {
+      userId: 'nonowner456',
+      guildOwnerId: 'owner123',
+    });
+  });
+
+  test('non-owner with no authorized role is denied (DENY audit)', async () => {
+    (authorize as jest.Mock).mockReturnValue('DENY');
+    const mockGuild = createMockGuild();
+    (mockGuild as any).ownerId = 'owner123';
+
+    await expect(runAudit(mockGuild, [], 'nonowner456')).rejects.toThrow('Unauthorized');
+    expect(authorize).toHaveBeenCalledWith([], 'AUDIT', {
+      userId: 'nonowner456',
+      guildOwnerId: 'owner123',
+    });
   });
 });

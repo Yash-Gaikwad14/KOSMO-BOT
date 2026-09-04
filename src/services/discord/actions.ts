@@ -1,5 +1,5 @@
 import { Guild, GuildChannel, Role, TextChannel, VoiceChannel, CategoryChannel, ChannelType } from 'discord.js';
-import { findRole, findChannel } from './lookup';
+import { findRole, findChannel, findCategory } from './lookup';
 import { validateAction } from './permissionValidator';
 import { DiscordAction } from './types';
 
@@ -21,7 +21,7 @@ export async function runAction(guild: Guild, action: DiscordAction): Promise<st
       return `Created role "${name}".`;
     }
     case 'createChannel': {
-      const { name, type } = action.payload;
+      const { name, type, category } = action.payload;
       const existing = findChannel(guild, name);
       if (existing) return `Channel "${name}" already exists.`;
       // Map simplified type string to Discord ChannelType enum
@@ -39,8 +39,23 @@ export async function runAction(guild: Guild, action: DiscordAction): Promise<st
         default:
           throw new Error(`Unsupported channel type: ${type}`);
       }
-      await guild.channels.create({ name, type: channelType });
-      return `Created ${type.toLowerCase().replace('guild_', '')} channel "${name}".`;
+
+      let parentId: string | undefined = undefined;
+      if (category) {
+        const cat = findCategory(guild, category);
+        if (!cat) {
+          throw new Error(`Category "${category}" not found in server.`);
+        }
+        parentId = cat.id;
+      }
+
+      if (parentId) {
+        await guild.channels.create({ name, type: channelType, parent: parentId });
+        return `Created ${type.toLowerCase().replace('guild_', '')} channel "${name}" inside category "${category}".`;
+      } else {
+        await guild.channels.create({ name, type: channelType });
+        return `Created ${type.toLowerCase().replace('guild_', '')} channel "${name}".`;
+      }
     }
     case 'assignRole': {
       const { roleName, memberId } = action.payload;
@@ -81,15 +96,28 @@ export async function runAction(guild: Guild, action: DiscordAction): Promise<st
       }
       return `Applied permission template to "${targetName}".`;
     }
+    case 'deleteChannel': {
+      const { channelName } = action.payload;
+      const channel = findChannel(guild, channelName);
+      if (!channel) return `Channel "${channelName}" not found or already deleted.`;
+      await channel.delete();
+      return `Deleted channel "${channelName}".`;
+    }
+    case 'deleteCategory': {
+      const { categoryName } = action.payload;
+      const category = findCategory(guild, categoryName);
+      if (!category) return `Category "${categoryName}" not found or already deleted.`;
+      await category.delete();
+      return `Deleted category "${categoryName}".`;
+    }
+    case 'deleteRole': {
+      const { roleName } = action.payload;
+      const role = findRole(guild, roleName);
+      if (!role) return `Role "${roleName}" not found or already deleted.`;
+      await role.delete();
+      return `Deleted role "${roleName}".`;
+    }
     default:
       throw new Error('Unknown action type');
   }
-}
-
-// Helper for categories (reuse findChannel logic)
-function findCategory(guild: Guild, nameOrId: string) {
-  const channel = guild.channels.cache.find(
-    (c) => (c.type === ChannelType.GuildCategory) && (c.id === nameOrId || c.name === nameOrId),
-  );
-  return channel ?? null;
 }

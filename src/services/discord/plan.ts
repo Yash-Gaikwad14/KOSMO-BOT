@@ -38,6 +38,12 @@ export class PlanService {
           }
           break;
 
+        case 'deleteChannel':
+        case 'deleteCategory':
+        case 'deleteRole':
+          highestRisk = 'HIGH';
+          break;
+
         case 'createChannel':
         case 'createRole':
         default:
@@ -95,5 +101,24 @@ export class PlanService {
     });
 
     return lines.join('\n');
+  }
+
+  // In-memory store for pending plans awaiting human confirmation
+  private static pendingPlans = new Map<string, Plan>();
+
+  public static storePlan(plan: Plan): void {
+    this.pendingPlans.set(plan.id, plan);
+  }
+
+  public static getPlan(planId: string): Plan | undefined {
+    return this.pendingPlans.get(planId);
+  }
+
+  public static removePlan(planId: string): void {
+    this.pendingPlans.delete(planId);
+  }
+
+  public static clearPendingPlans(): void {
+    this.pendingPlans.clear();
   }
 }

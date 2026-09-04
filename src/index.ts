@@ -1,10 +1,11 @@
-﻿// Literal first import - loads .env before anything else runs.
+// Literal first import - loads .env before anything else runs.
 require("dotenv/config");
 
 import { Client, GatewayIntentBits } from "discord.js";
 import * as path from "path";
 import { loadCommands } from "./commands/loader";
 import { registerCommands } from "./commands/register";
+import { handleConfirmationButton } from "./commands/kosmo/manage";
 
 async function main(): Promise<void> {
   const token = process.env.DISCORD_BOT_TOKEN;
@@ -47,6 +48,17 @@ async function main(): Promise<void> {
   });
 
   client.on("interactionCreate", async (interaction) => {
+    if (interaction.isButton()) {
+      try {
+        if (!interaction.replied && !interaction.deferred) {
+          await handleConfirmationButton(interaction);
+        }
+      } catch (err) {
+        console.error("Error handling button interaction:", err);
+      }
+      return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
     const entry = commands.get(interaction.commandName);

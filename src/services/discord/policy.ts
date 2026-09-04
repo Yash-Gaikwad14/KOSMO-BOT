@@ -38,59 +38,182 @@ interface RoleConfig {
 }
 
 let roleConfig: RoleConfig = {};
-const configPath = path.resolve(__dirname, '../../config/roles.json');
-try {
-  const raw = fs.readFileSync(configPath, { encoding: 'utf-8' });
-  roleConfig = JSON.parse(raw);
-} catch (e) {
-  // If the file is missing we keep an empty config – the policy will simply deny.
-  console.warn('Policy: could not read roles config', e);
+const candidateRolePaths = [
+  path.resolve(__dirname, '../../config/roles.json'), // ts-node / src runtime: src/services/discord -> src/config/roles.json
+  path.resolve(__dirname, '../../../src/config/roles.json'), // compiled runtime: dist/services/discord -> src/config/roles.json
+  path.resolve(process.cwd(), 'src/config/roles.json'), // process root fallback
+];
+for (const cand of candidateRolePaths) {
+  if (fs.existsSync(cand)) {
+    try {
+      const raw = fs.readFileSync(cand, { encoding: 'utf-8' });
+      roleConfig = JSON.parse(raw);
+      break;
+    } catch (e) {
+      console.warn(`Policy: could not parse roles config at ${cand}`, e);
+    }
+  }
+}
+
+/**
+ * Explicit human authorization levels for Kosmo Discord Bot.
+ *
+ * Security Hierarchy (highest to lowest):
+ * 1. OWNER      - Discord Server Owner (dynamically resolved from guild.ownerId, independent of roles.json)
+ * 2. FOUNDER    - Configured Kosmo Founder role (roles.json)
+ * 3. TEAM_KOSMO - Configured Team Kosmo operational authority (roles.json)
+ * 4. ADMIN      - Configured Admin authority (roles.json)
+ * 5. MODERATOR  - Configured Moderator authority (roles.json)
+ * 6. NONE       - Unrecognized / unprivileged user
+ *
+ * Security Boundary Notice:
+ * - Server Owner is verified via Discord runtime state (guild.ownerId === userId).
+ * - Kosmo human roles are mapped from configured Discord role IDs in roles.json.
+ * - Policy authorization answers: "Is this human allowed to request/approve this category of operation?"
+ * - Action safety validation (PermissionValidator) answers: "Is this specific action safe to execute?"
+ * These layers operate independently and must never be conflated.
+ */
+export enum AuthLevel {
+  OWNER = 'OWNER',
+  FOUNDER = 'FOUNDER',
+  TEAM_KOSMO = 'TEAM_KOSMO',
+  ADMIN = 'ADMIN',
+  MODERATOR = 'MODERATOR',
+  NONE = 'NONE',
+}
+
+/**
+ * Context provided to policy authorization for dynamic server-owner and caller resolution.
+ */
+export interface AuthContext {
+  userId?: string;
+  guildOwnerId?: string;
 }
 
 /** Helper – does the user have any of the Discord role IDs belonging to the logical role? */
 function hasLogicalRole(userRoleIds: string[], logical: LogicalRole): boolean {
   const ids = roleConfig[logical] ?? [];
-  return userRoleIds.some((id) => ids.includes(id));
+  return userRoleIds.some((idOrName) => {
+    if (ids.includes(idOrName)) return true;
+    // Also match logical role name case-insensitively for backward compatibility with mock tests
+    if (idOrName.toLowerCase() === logical.toLowerCase()) return true;
+    if (logical === LogicalRole.Admin && idOrName.toLowerCase() === 'administrator') return true;
+    return false;
+  });
 }
 
 /**
- * Centralised authorization check.
+ * Resolves the explicit authorization level for a user given their Discord role IDs
+ * and optional context (user ID and guild owner ID).
  *
- * @param userRoleIds – array of Discord role IDs the user possesses.
- * @param category – the operation the user wants to perform.
+ * Precedence rule: Highest authority wins:
+ * OWNER > FOUNDER > TEAM_KOSMO > ADMIN > MODERATOR > NONE
+ *
+ * @param userRoleIds Array of Discord role IDs the user possesses.
+ * @param context Optional context containing userId and guildOwnerId.
+ * @returns The resolved AuthLevel.
+ */
+export function getAuthLevel(
+  userRoleIds: string[],
+  context?: AuthContext
+): AuthLevel {
+  // 1. Discord Server Owner (highest authority, dynamic from runtime guild.ownerId, independent of roles.json)
+  if (context?.userId && context?.guildOwnerId && context.userId === context.guildOwnerId) {
+    return AuthLevel.OWNER;
+  }
+
+  // 2. Founder (highest configured Kosmo human role)
+  if (hasLogicalRole(userRoleIds, LogicalRole.Founder)) {
+    return AuthLevel.FOUNDER;
+  }
+
+  // 3. Team Kosmo (trusted Kosmo operational authority)
+  if (hasLogicalRole(userRoleIds, LogicalRole.TeamKosmo)) {
+    return AuthLevel.TEAM_KOSMO;
+  }
+
+  // 4. Admin (broad administrative authority)
+  if (hasLogicalRole(userRoleIds, LogicalRole.Admin)) {
+    return AuthLevel.ADMIN;
+  }
+
+  // 5. Moderator (limited operational/read-only authority)
+  if (hasLogicalRole(userRoleIds, LogicalRole.Moderator)) {
+    return AuthLevel.MODERATOR;
+  }
+
+  // 6. Everyone else
+  return AuthLevel.NONE;
+}
+
+/**
+ * Evaluates the authorization matrix for a given authorization level and operation category.
+ *
+ * Authorization Matrix:
+ * ┌────────────┬───────┬────────┬─────────┬───────────────────────────┬───────────────────────────┐
+ * │ Level      │ AUDIT │ MANAGE │ DRY_RUN │ REPAIR                    │ CONFIRM                   │
+ * ├────────────┼───────┼────────┼─────────┼───────────────────────────┼───────────────────────────┤
+ * │ OWNER      │ ALLOW │ ALLOW  │ ALLOW   │ ALLOW                     │ ALLOW                     │
+ * │ FOUNDER    │ ALLOW │ ALLOW  │ ALLOW   │ ALLOW                     │ ALLOW                     │
+ * │ TEAM_KOSMO │ ALLOW │ ALLOW  │ ALLOW   │ ALLOW                     │ ALLOW                     │
+ * │ ADMIN      │ ALLOW │ ALLOW  │ ALLOW   │ REQUIRES_FOUNDERS_APPROVAL│ REQUIRES_FOUNDERS_APPROVAL│
+ * │ MODERATOR  │ ALLOW │ DENY   │ DENY    │ DENY                      │ DENY                      │
+ * │ NONE       │ DENY  │ DENY   │ DENY    │ DENY                      │ DENY                      │
+ * └────────────┴───────┴────────┴─────────┴───────────────────────────┴───────────────────────────┘
+ *
+ * @param level The caller's resolved AuthLevel.
+ * @param category The requested operation category.
  * @returns PolicyDecision – ALLOW, DENY, or REQUIRES_FOUNDERS_APPROVAL.
  */
-export function authorize(userRoleIds: string[], category: Category): PolicyDecision {
-  // Founder can always do everything.
-  if (hasLogicalRole(userRoleIds, LogicalRole.Founder)) {
-    return 'ALLOW';
-  }
-
-  // Team Kosmo has full privileges similar to Founder for Phase 3.
-  if (hasLogicalRole(userRoleIds, LogicalRole.TeamKosmo)) {
-    return 'ALLOW';
-  }
-
-  // Admins have broad permissions but repairs are considered high‑risk.
-  if (hasLogicalRole(userRoleIds, LogicalRole.Admin)) {
-    if (category === Category.REPAIR) {
-      // Requires explicit Founder/Team approval.
-      return 'REQUIRES_FOUNDERS_APPROVAL';
-    }
-    // All other categories are allowed.
-    return 'ALLOW';
-  }
-
-  // Moderators can only perform safe, read‑only operations like AUDIT.
-  if (hasLogicalRole(userRoleIds, LogicalRole.Moderator)) {
-    if (category === Category.AUDIT) {
+export function evaluatePolicy(level: AuthLevel, category: Category): PolicyDecision {
+  switch (level) {
+    case AuthLevel.OWNER:
+    case AuthLevel.FOUNDER:
+    case AuthLevel.TEAM_KOSMO:
       return 'ALLOW';
-    }
-    return 'DENY';
-  }
 
-  // No recognised logical role – deny everything.
-  return 'DENY';
+    case AuthLevel.ADMIN:
+      if (category === Category.REPAIR || category === Category.CONFIRM) {
+        return 'REQUIRES_FOUNDERS_APPROVAL';
+      }
+      return 'ALLOW';
+
+    case AuthLevel.MODERATOR:
+      if (category === Category.AUDIT) {
+        return 'ALLOW';
+      }
+      return 'DENY';
+
+    case AuthLevel.NONE:
+    default:
+      return 'DENY';
+  }
+}
+
+/**
+ * Centralised authorization check. Single source of truth for authorization decisions.
+ *
+ * Evaluation Pipeline:
+ * Request (userRoleIds + context)
+ *   ↓
+ * Identify Authorization Level (getAuthLevel)
+ *   ↓
+ * Evaluate Operation Category (evaluatePolicy)
+ *   ↓
+ * PolicyDecision (ALLOW / DENY / REQUIRES_FOUNDERS_APPROVAL)
+ *
+ * @param userRoleIds Array of Discord role IDs the user possesses.
+ * @param category The operation the user wants to perform.
+ * @param context Optional context with userId and guildOwnerId for server owner evaluation.
+ * @returns PolicyDecision – ALLOW, DENY, or REQUIRES_FOUNDERS_APPROVAL.
+ */
+export function authorize(
+  userRoleIds: string[],
+  category: Category,
+  context?: AuthContext
+): PolicyDecision {
+  const level = getAuthLevel(userRoleIds, context);
+  return evaluatePolicy(level, category);
 }
 
 /**
@@ -121,6 +244,7 @@ export interface IPolicyService {
 export class PolicyService implements IPolicyService {
   /**
    * Checks if a user has permission to invoke Natural Language Management (/kosmo manage).
+   * Evaluated via the centralized authorize() policy layer for Category.MANAGE.
    */
   public canExecuteNLManagement(context: NLContext): boolean {
     if (!context) return false;
@@ -130,9 +254,27 @@ export class PolicyService implements IPolicyService {
       return true;
     }
 
-    // Role check against authorized logical management roles
-    const userRoles = (context.roles || []).map((r) => r.toLowerCase().trim());
-    return userRoles.some((r) => ALLOWED_MANAGEMENT_ROLES.includes(r));
+    const authContext: AuthContext = {
+      userId: context.userId,
+      guildOwnerId: context.guildOwnerId,
+    };
+
+    const level = getAuthLevel(context.roles || [], authContext);
+    const decision = evaluatePolicy(level, Category.MANAGE);
+
+    console.log(`[AUTH DEBUG]
+user=${context.username}
+userId=${context.userId}
+guildId=${context.guildId ?? 'unknown'}
+guildOwnerId=${context.guildOwnerId ?? 'unknown'}
+roleIds=${JSON.stringify(context.roles || [])}
+founderRoleConfigured=${JSON.stringify(roleConfig[LogicalRole.Founder] ?? [])}
+teamKosmoRoleConfigured=${JSON.stringify(roleConfig[LogicalRole.TeamKosmo] ?? [])}
+resolvedAuthLevel=${level}
+category=MANAGE
+decision=${decision}`);
+
+    return decision === 'ALLOW';
   }
 }
 

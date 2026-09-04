@@ -19,32 +19,90 @@ export type LLMCompletionFn = (options: LLMCompletionOptions) => Promise<string>
 
 export const NL_SYSTEM_PROMPT = `
 You are the Kosmo Discord Infrastructure AI Planner.
-Your sole job is to translate natural language administration requests into a strictly structured JSON array of Discord actions.
+Your sole job is to translate natural language administration requests into a strictly structured JSON object containing Discord actions.
 
-You MUST output ONLY valid JSON in the following schema:
+CRITICAL OUTPUT FORMAT REQUIREMENTS:
+1. The response must contain ONLY one valid JSON object.
+2. No Markdown code fences (do NOT wrap in \`\`\`json or \`\`\`).
+3. No explanation.
+4. No introductory text.
+5. No concluding text.
+6. Do not output TypeScript.
+7. Do not output JSON Schema.
+8. Do not output type declarations.
+9. Every property value must be an actual JSON value.
+10. The response must be parseable directly by JSON.parse().
+11. Do not invent unsupported action types.
+12. Follow the existing action schema used by KOSMO.
+
+KOSMO ACTION SCHEMA:
+The root JSON object must follow this structure:
 {
-  "planName": "Short descriptive title",
-  "explanation": "Brief reasoning of what was planned",
+  "planName": "Descriptive title for the plan",
+  "explanation": "Brief explanation of what is planned",
+  "actions": []
+}
+
+Supported Action Types & Payloads:
+1. createRole:
+   - "name": concrete role name string
+   - "color": (optional) integer color code
+   - "hoist": (optional) boolean
+2. createChannel:
+   - "name": concrete channel name string
+   - "type": "GUILD_TEXT" or "GUILD_VOICE" or "GUILD_CATEGORY"
+   - "category": (optional) concrete name of the existing parent category to place this channel inside (e.g. when requested "inside", "under", or "in" a category)
+   Note: "category" must refer to an EXISTING Discord category. Do not invent category IDs or automatically create missing categories. Preserve user-requested category parenting.
+3. assignRole:
+   - "roleName": concrete role name string
+   - "memberId": concrete Discord user ID string
+4. removeRole:
+   - "roleName": concrete role name string
+   - "memberId": concrete Discord user ID string
+5. applyPermissionTemplate:
+   - "targetName": concrete channel name string
+   - "permissionOverwrites": array of { "id": concrete target ID, "allow": [], "deny": [] }
+
+EXAMPLES:
+
+Example of VALID output:
+{
   "actions": [
     {
-      "type": "createRole" | "createChannel" | "assignRole" | "removeRole" | "applyPermissionTemplate",
-      "payload": { ... }
+      "type": "createChannel",
+      "payload": {
+        "name": "test-channel",
+        "type": "GUILD_TEXT"
+      }
     }
   ]
 }
 
-Supported Action Types & Payloads:
-1. createRole: { "name": string, "color"?: number, "hoist"?: boolean }
-2. createChannel: { "name": string, "type": "GUILD_TEXT" | "GUILD_VOICE" | "GUILD_CATEGORY" }
-3. assignRole: { "roleName": string, "memberId": string }
-4. removeRole: { "roleName": string, "memberId": string }
-5. applyPermissionTemplate: { "targetName": string, "permissionOverwrites": [{ "id": string, "allow"?: string[], "deny"?: string[] }] }
+Example of INVALID output:
+{
+  "actions": [
+    {
+      "type": "createChannel",
+      "payload": {
+        "name": string,
+        "type": "GUILD_TEXT"
+      }
+    }
+  ]
+}
+Notice that \`string\` above is a TypeScript/schema placeholder and MUST NEVER be emitted. You must use concrete JSON values.
+
+Another invalid example:
+{
+  "actions": [...]
+}
+Do not use \`...\` because ellipsis is not valid JSON.
 
 STRICT SAFETY RULES:
 - NEVER output deletion or destructive actions.
 - NEVER grant "Administrator", "ManageGuild", "KickMembers", or "BanMembers" permissions in permissionOverwrites.
 - NEVER create or assign privileged roles ("Founder", "Team Kosmo", "Moderator", "Administrator", "Admin", "Owner", "KosmoBot").
-- Output pure JSON only. Do not add conversational markdown or text outside the JSON.
+- Output pure JSON only. Do not add conversational text or markdown.
 `.trim();
 
 /**
@@ -142,7 +200,32 @@ export class NLManager {
     }
 
     // 4. Sanitize and Validate Actions
-    const rawActions: DiscordAction[] = parsed.actions;
+    const rawActions: DiscordAction[] = (parsed.actions || []).map((action: any) => {
+      if (action && typeof action === 'object') {
+        const payload = { ...(action.payload || {}) };
+        if (action.type === 'createChannel') {
+          if (!payload.name && payload.channelName) {
+            payload.name = payload.channelName;
+          }
+          if (!payload.type) {
+            payload.type = 'GUILD_TEXT';
+          }
+          const categoryName =
+            payload.category ||
+            payload.parent ||
+            payload.categoryName;
+          if (categoryName && typeof categoryName === 'string') {
+            payload.category = categoryName.trim();
+          }
+        }
+        return {
+          ...action,
+          payload,
+        };
+      }
+      return action;
+    });
+
     const validation = PermissionValidator.validateActions(rawActions);
 
     // 5. Create Plan
@@ -177,55 +260,293 @@ export class NLManager {
   }
 
   /**
-   * Safely extracts JSON from raw LLM output, stripping markdown formatting if present.
+   * Safely extracts JSON from raw LLM output, stripping markdown formatting
+   * and conversational prose if present.
    */
   public extractAndParseJSON(raw: string): any {
-    let clean = raw.trim();
+    if (!raw || typeof raw !== 'string') {
+      throw new Error('Empty or invalid LLM response string.');
+    }
 
-    // If wrapped in markdown code fence, unwrap it
-    if (clean.includes('```')) {
-      const match = clean.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-      if (match && match[1]) {
-        clean = match[1].trim();
+    let text = raw.trim();
+
+    // 1. Check for markdown code fences first (```json ... ``` or ``` ... ```)
+    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (codeBlockMatch && codeBlockMatch[1]) {
+      const fenceContent = codeBlockMatch[1].trim();
+      try {
+        const parsed = JSON.parse(fenceContent);
+        if (Array.isArray(parsed)) {
+          return { actions: parsed };
+        }
+        return parsed;
+      } catch {
+        // If direct parse fails (e.g. trailing commas), continue to extractor using fenceContent
+        text = fenceContent;
       }
     }
 
-    return JSON.parse(clean);
+    // 2. Locate the outermost JSON object `{ ... }` or array `[ ... ]`
+    const firstBrace = text.indexOf('{');
+    const firstBracket = text.indexOf('[');
+
+    let startIndex = -1;
+    let endIndex = -1;
+
+    if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
+      startIndex = firstBrace;
+      endIndex = text.lastIndexOf('}');
+    } else if (firstBracket !== -1) {
+      startIndex = firstBracket;
+      endIndex = text.lastIndexOf(']');
+    }
+
+    if (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
+      const candidate = text.substring(startIndex, endIndex + 1).trim();
+      try {
+        const parsed = JSON.parse(candidate);
+        if (Array.isArray(parsed)) {
+          return { actions: parsed };
+        }
+        return parsed;
+      } catch (err: any) {
+        // Attempt to clean trailing commas before closing braces/brackets
+        try {
+          const cleaned = candidate.replace(/,\s*([}\]])/g, '$1');
+          const parsed = JSON.parse(cleaned);
+          if (Array.isArray(parsed)) {
+            return { actions: parsed };
+          }
+          return parsed;
+        } catch {
+          throw new Error(`Failed to parse extracted JSON block: ${err.message}`);
+        }
+      }
+    }
+
+    // 3. Fallback: try parsing directly
+    return JSON.parse(text);
   }
 
   /**
-   * Default LLM invoker using the configured Gemini/Grok/OpenAI API endpoint.
+   * Default LLM invoker using OpenRouter's OpenAI-compatible API endpoint.
+   *
+   * Handles both:
+   * - HTTP-level OpenRouter failures
+   * - Application-level provider errors returned with HTTP 200
+   *
+   * A single retry is attempted for temporary upstream/provider failures.
    */
-  private async defaultLLMCaller(options: LLMCompletionOptions): Promise<string> {
-    const apiKey = process.env.LLM_API_KEY;
+  public async defaultLLMCaller(options: LLMCompletionOptions): Promise<string> {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+
     if (!apiKey) {
-      throw new Error('LLM_API_KEY environment variable is not set.');
+      throw new Error('OPENROUTER_API_KEY environment variable is not set.');
     }
 
-    const model = options.model ?? process.env.LLM_MODEL ?? 'gemini-3.6-flash';
-    const baseUrl = process.env.LLM_BASE_URL ?? 'https://generativelanguage.googleapis.com/v1beta/openai';
+    const model =
+      options.model ??
+      process.env.OPENROUTER_MODEL ??
+      'meta-llama/llama-3.3-70b-instruct';
 
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        messages: options.messages,
-        temperature: options.temperature ?? 0.2,
-        max_tokens: options.max_tokens ?? 1024,
-      }),
-    });
+    const baseUrl = 'https://openrouter.ai/api/v1';
 
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => '(unreadable body)');
-      throw new Error(`LLM API request failed [${response.status} ${response.statusText}]: ${errorText}`);
+    const maxAttempts = 2;
+    let lastError = 'Unknown OpenRouter error';
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await fetch(`${baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer':
+              'https://github.com/Yash-Gaikwad14/KOSMO-BOT',
+            'X-Title': 'Kosmo Discord Bot',
+          },
+          body: JSON.stringify({
+            model,
+            messages: options.messages,
+            temperature: options.temperature ?? 0.2,
+            max_tokens: options.max_tokens ?? 1024,
+          }),
+        });
+
+        const contentType = response.headers?.get
+          ? response.headers.get('content-type') ?? 'unknown'
+          : 'unknown';
+
+        let rawData = '';
+        let data: any = null;
+
+        // Support both real fetch Response objects and the lightweight
+        // Jest mocks used by the existing integration tests.
+        if (typeof response.text === 'function') {
+          rawData = await response.text().catch(() => '(unreadable body)');
+
+          try {
+            data = JSON.parse(rawData);
+          } catch {
+            data = null;
+          }
+        } else if (typeof (response as any).json === 'function') {
+          try {
+            data = await (response as any).json();
+            rawData = JSON.stringify(data);
+          } catch {
+            rawData = '(unreadable JSON body)';
+            data = null;
+          }
+        } else {
+          rawData = '(response body unavailable)';
+        }
+
+        // ------------------------------------------------------------
+        // 1. HTTP-level failure
+        // ------------------------------------------------------------
+        if (!response.ok) {
+          const errorMessage =
+            data?.error?.message ||
+            rawData ||
+            response.statusText ||
+            'Unknown OpenRouter API error';
+
+          lastError = `OpenRouter API request failed [${response.status} ${response.statusText}]: ${errorMessage}`;
+
+          console.log(`[LLM DEBUG]
+provider=OpenRouter
+model=${model}
+attempt=${attempt}/${maxAttempts}
+status=${response.status}
+contentType=${contentType}
+errorType=http
+rawLength=${rawData.length}
+responsePreview=${rawData
+  .substring(0, 300)
+  .replace(/\r?\n/g, ' ')}`);
+
+          // Retry temporary server/provider failures.
+          if (response.status >= 500 && attempt < maxAttempts) {
+            console.log(
+              `[LLM DEBUG] Temporary HTTP failure. Retrying attempt ${attempt + 1}/${maxAttempts}...`
+            );
+
+            continue;
+          }
+
+          throw new Error(lastError);
+        }
+
+        // ------------------------------------------------------------
+        // 2. Application-level provider failure
+        //
+        // OpenRouter can return HTTP 200 while the upstream provider
+        // itself failed. Example:
+        //
+        // {
+        //   "error": {
+        //     "message": "Upstream error from Nvidia...",
+        //     "code": 502
+        //   }
+        // }
+        // ------------------------------------------------------------
+        if (data?.error) {
+          const providerMessage =
+            data.error.message || 'Unknown upstream provider error';
+
+          const providerCode = data.error.code
+            ? ` [code ${data.error.code}]`
+            : '';
+
+          lastError = `OpenRouter upstream provider error${providerCode}: ${providerMessage}`;
+
+          console.log(`[LLM DEBUG]
+provider=OpenRouter
+model=${model}
+attempt=${attempt}/${maxAttempts}
+status=${response.status}
+contentType=${contentType}
+errorType=upstream-provider
+providerCode=${data.error.code ?? 'unknown'}
+rawLength=${rawData.length}
+responsePreview=${rawData
+  .substring(0, 300)
+  .replace(/\r?\n/g, ' ')}`);
+
+          // Retry upstream 5xx/provider errors once.
+          const providerErrorCode = Number(data.error.code);
+
+          if (
+            providerErrorCode >= 500 &&
+            providerErrorCode < 600 &&
+            attempt < maxAttempts
+          ) {
+            console.log(
+              `[LLM DEBUG] Upstream provider temporarily unavailable. Retrying attempt ${attempt + 1}/${maxAttempts}...`
+            );
+
+            continue;
+          }
+
+          throw new Error(lastError);
+        }
+
+        // ------------------------------------------------------------
+        // 3. Successful response — extract model content
+        // ------------------------------------------------------------
+        const content =
+          data?.choices?.[0]?.message?.content?.trim() ?? '';
+
+        console.log(`[LLM DEBUG]
+provider=OpenRouter
+model=${model}
+attempt=${attempt}/${maxAttempts}
+status=${response.status}
+contentType=${contentType}
+errorType=none
+rawLength=${rawData.length}
+contentLength=${content.length}
+responsePreview=${(content || rawData)
+  .substring(0, 300)
+  .replace(/\r?\n/g, ' ')}`);
+
+        if (!content) {
+          lastError =
+            'OpenRouter returned a successful response but no LLM content was present.';
+
+          console.log(
+            `[LLM DEBUG] ${lastError}`
+          );
+
+          // Don't blindly retry malformed successful responses twice.
+          throw new Error(lastError);
+        }
+
+        return content;
+      } catch (err: any) {
+        // If this was our explicit retryable error, continue only when
+        // the loop still has another attempt.
+        lastError = err?.message || String(err);
+
+        if (
+          attempt < maxAttempts &&
+          /upstream provider|temporarily unavailable|request failed \[5\d\d/i.test(
+            lastError
+          )
+        ) {
+          console.log(
+            `[LLM DEBUG] Retrying after temporary LLM failure: ${lastError}`
+          );
+
+          continue;
+        }
+
+        throw new Error(lastError);
+      }
     }
 
-    const data = (await response.json()) as any;
-    return data.choices?.[0]?.message?.content?.trim() ?? '';
+    throw new Error(lastError);
   }
 }
 

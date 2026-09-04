@@ -115,6 +115,35 @@ export class PermissionValidator {
         break;
       }
 
+      case 'deleteRole': {
+        const roleName = action.payload.roleName?.trim() || '';
+        const lowerName = roleName.toLowerCase();
+        if (PRIVILEGED_ROLE_NAMES.some((p) => p.toLowerCase() === lowerName)) {
+          blocked = true;
+          blockedReasons.push(`Deletion of privileged role '${roleName}' is not allowed.`);
+        }
+        if (!roleName) {
+          errors.push('Role name cannot be empty for deletion.');
+        }
+        break;
+      }
+
+      case 'deleteChannel': {
+        const channelName = action.payload.channelName?.trim() || '';
+        if (!channelName) {
+          errors.push('Channel name cannot be empty for deletion.');
+        }
+        break;
+      }
+
+      case 'deleteCategory': {
+        const categoryName = action.payload.categoryName?.trim() || '';
+        if (!categoryName) {
+          errors.push('Category name cannot be empty for deletion.');
+        }
+        break;
+      }
+
       default:
         warnings.push(`Unrecognized action type: ${(action as any).type}`);
     }

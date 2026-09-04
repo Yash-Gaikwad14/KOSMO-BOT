@@ -7,6 +7,7 @@ export type CreateRolePayload = {
 export type CreateChannelPayload = {
   name: string;
   type: 'GUILD_TEXT' | 'GUILD_VOICE' | 'GUILD_CATEGORY';
+  category?: string;
 };
 
 export type AssignRolePayload = {
@@ -27,12 +28,27 @@ export type ApplyPermissionTemplatePayload = {
   permissionOverwrites: PermissionOverwrite[];
 };
 
+export type DeleteChannelPayload = {
+  channelName: string;
+};
+
+export type DeleteCategoryPayload = {
+  categoryName: string;
+};
+
+export type DeleteRolePayload = {
+  roleName: string;
+};
+
 export type DiscordAction =
   | { type: 'createRole'; payload: CreateRolePayload }
   | { type: 'createChannel'; payload: CreateChannelPayload }
   | { type: 'assignRole'; payload: AssignRolePayload }
   | { type: 'removeRole'; payload: RemoveRolePayload }
-  | { type: 'applyPermissionTemplate'; payload: ApplyPermissionTemplatePayload };
+  | { type: 'applyPermissionTemplate'; payload: ApplyPermissionTemplatePayload }
+  | { type: 'deleteChannel'; payload: DeleteChannelPayload }
+  | { type: 'deleteCategory'; payload: DeleteCategoryPayload }
+  | { type: 'deleteRole'; payload: DeleteRolePayload };
 
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' | 'BLOCKED';
 
@@ -63,6 +79,7 @@ export interface NLContext {
   username: string;
   roles: string[];
   guildId?: string;
+  guildOwnerId?: string;
   channelId?: string;
   isFounder?: boolean;
 }
