@@ -82,7 +82,29 @@ export const data = new SlashCommandBuilder()
           .setDescription('Reason for ban (max 512 characters)')
           .setRequired(true)
       )
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName('purge')
+      .setDescription('Bulk delete recent messages in the current channel (requires interactive confirmation)')
+      .addIntegerOption((option) =>
+        option
+          .setName('amount')
+          .setDescription('Number of messages to delete (1-100)')
+          .setRequired(true)
+          .setMinValue(1)
+          .setMaxValue(100)
+      )
+      .addStringOption((option) =>
+        option
+          .setName('reason')
+          .setDescription('Reason for message purge (max 512 characters)')
+          .setRequired(true)
+          .setMaxLength(512)
+      )
   );
+
+export const MAX_PURGE_AMOUNT = 100;
 
 export async function execute(interaction: ChatInputCommandInteraction): Promise<void> {
   const subcommand = interaction.options.getSubcommand(false);
@@ -93,6 +115,10 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
 
   if (subcommand === 'ban') {
     return handleBanProposal(interaction);
+  }
+
+  if (subcommand === 'purge') {
+    return handlePurgeProposal(interaction);
   }
 
   // Default to timeout handler (preserves Phase 4D.1 behavior)
@@ -714,6 +740,182 @@ async function handleBanProposal(interaction: ChatInputCommandInteraction): Prom
 }
 
 /**
+ * Handles proposal creation for /mod purge amount:<number> reason:<reason>.
+ * Creates a pending proposal and asks for human confirmation.
+ * Does NOT delete any messages.
+ */
+async function handlePurgeProposal(interaction: ChatInputCommandInteraction): Promise<void> {
+  // 1. Guild-only guard
+  const guild = interaction.guild;
+  if (!guild) {
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp({ content: 'Command must be used in a guild.', ephemeral: true });
+    } else {
+      await interaction.reply({ content: 'Command must be used in a guild.', ephemeral: true });
+    }
+    return;
+  }
+
+  // 2. Authorization check: Category.MODERATE
+  const callerRoles = extractUserRoleIds(interaction.member);
+  const authDecision = authorize(callerRoles, Category.MODERATE, {
+    userId: interaction.user.id,
+    guildOwnerId: guild.ownerId,
+  });
+
+  if (authDecision !== 'ALLOW') {
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp({
+        content: '❌ You are not authorized to use moderation commands.',
+        ephemeral: true,
+      });
+    } else {
+      await interaction.reply({
+        content: '❌ You are not authorized to use moderation commands.',
+        ephemeral: true,
+      });
+    }
+    return;
+  }
+
+  // 3. Channel validity check: must support bulk message deletion
+  const channel = interaction.channel;
+  if (!channel || typeof (channel as any).bulkDelete !== 'function') {
+    const msg = '❌ This channel does not support message deletion.';
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp({ content: msg, ephemeral: true });
+    } else {
+      await interaction.reply({ content: msg, ephemeral: true });
+    }
+    return;
+  }
+
+  // 4. Bot permission check: ManageMessages in this channel
+  const botMember =
+    guild.members.me ??
+    (typeof guild.members.fetchMe === 'function'
+      ? await guild.members.fetchMe().catch(() => null)
+      : null);
+
+  let hasManageMessages = false;
+  if (botMember && typeof (channel as any).permissionsFor === 'function') {
+    const perms = (channel as any).permissionsFor(botMember);
+    hasManageMessages = Boolean(
+      perms &&
+      (perms.has(PermissionFlagsBits.ManageMessages) || perms.has('ManageMessages'))
+    );
+  } else if (botMember && botMember.permissions) {
+    hasManageMessages = Boolean(
+      botMember.permissions.has(PermissionFlagsBits.ManageMessages) ||
+      botMember.permissions.has('ManageMessages')
+    );
+  }
+
+  if (!hasManageMessages) {
+    const msg = '❌ Bot lacks the "Manage Messages" permission in this channel.';
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp({ content: msg, ephemeral: true });
+    } else {
+      await interaction.reply({ content: msg, ephemeral: true });
+    }
+    return;
+  }
+
+  // 5. Extract and validate amount: 1-100 (no silent clamping)
+  const amount = interaction.options.getInteger('amount');
+  if (
+    amount === null ||
+    typeof amount !== 'number' ||
+    !Number.isInteger(amount) ||
+    amount < 1 ||
+    amount > MAX_PURGE_AMOUNT
+  ) {
+    const msg = `❌ Purge amount must be an integer between 1 and ${MAX_PURGE_AMOUNT}.`;
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp({ content: msg, ephemeral: true });
+    } else {
+      await interaction.reply({ content: msg, ephemeral: true });
+    }
+    return;
+  }
+
+  // 6. Extract and validate reason: 1-512 chars
+  const rawReason = interaction.options.getString('reason');
+  const reason = rawReason ? rawReason.trim() : '';
+  if (!reason) {
+    const msg = '❌ A valid reason must be provided for the purge.';
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp({ content: msg, ephemeral: true });
+    } else {
+      await interaction.reply({ content: msg, ephemeral: true });
+    }
+    return;
+  }
+
+  if (reason.length > 512) {
+    const msg = '❌ Purge reason cannot exceed 512 characters.';
+    if (interaction.replied || interaction.deferred) {
+      await interaction.followUp({ content: msg, ephemeral: true });
+    } else {
+      await interaction.reply({ content: msg, ephemeral: true });
+    }
+    return;
+  }
+
+  // 7. Create pending moderation proposal
+  const pendingAction = createPendingModAction({
+    guildId: guild.id,
+    moderatorId: interaction.user.id,
+    channelId: interaction.channelId,
+    amount,
+    actionType: 'PURGE',
+    reason,
+  });
+
+  // 8. Build interactive confirmation embed and buttons
+  const confirmEmbed = new EmbedBuilder()
+    .setTitle('⚠️ CONFIRM MESSAGE PURGE')
+    .setColor(0xfee75c)
+    .setDescription(
+      `Are you sure you want to purge **${amount}** messages from <#${interaction.channelId}>?\n\n` +
+      `**Warning**: Message deletion is destructive and cannot be undone.`
+    )
+    .addFields(
+      { name: 'Channel', value: `<#${interaction.channelId}>`, inline: true },
+      { name: 'Requested Amount', value: `\`${amount} messages\``, inline: true },
+      { name: 'Action', value: '`PURGE`', inline: true },
+      { name: 'Reason', value: reason, inline: false },
+      {
+        name: 'Confirmation Window',
+        value: 'This confirmation will expire in **5 minutes**. Only the initiating moderator can confirm.',
+        inline: false,
+      }
+    )
+    .setFooter({
+      text: `Initiated by @${interaction.user.username} • Awaiting confirmation • No messages deleted yet`,
+    })
+    .setTimestamp();
+
+  const confirmButton = new ButtonBuilder()
+    .setCustomId(`mod_purge_confirm_${pendingAction.id}`)
+    .setLabel('Confirm Purge')
+    .setStyle(ButtonStyle.Danger);
+
+  const cancelButton = new ButtonBuilder()
+    .setCustomId(`mod_purge_cancel_${pendingAction.id}`)
+    .setLabel('Cancel')
+    .setStyle(ButtonStyle.Secondary);
+
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(confirmButton, cancelButton);
+
+  if (interaction.replied || interaction.deferred) {
+    await interaction.followUp({ embeds: [confirmEmbed], components: [row] });
+  } else {
+    await interaction.reply({ embeds: [confirmEmbed], components: [row] });
+  }
+}
+
+/**
  * Handler for Phase 4D.2 & 4D.3A interactive moderation buttons
  * (`mod_kick_confirm_...`, `mod_kick_cancel_...`, `mod_ban_confirm_...`, `mod_ban_cancel_...`).
  */
@@ -723,9 +925,11 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
   const isKickCancel = customId.startsWith('mod_kick_cancel_');
   const isBanConfirm = customId.startsWith('mod_ban_confirm_');
   const isBanCancel = customId.startsWith('mod_ban_cancel_');
+  const isPurgeConfirm = customId.startsWith('mod_purge_confirm_');
+  const isPurgeCancel = customId.startsWith('mod_purge_cancel_');
 
-  const isConfirm = isKickConfirm || isBanConfirm;
-  const isCancel = isKickCancel || isBanCancel;
+  const isConfirm = isKickConfirm || isBanConfirm || isPurgeConfirm;
+  const isCancel = isKickCancel || isBanCancel || isPurgeCancel;
 
   if (!isConfirm && !isCancel) return;
 
@@ -735,7 +939,11 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
     ? customId.replace('mod_kick_cancel_', '')
     : isBanConfirm
     ? customId.replace('mod_ban_confirm_', '')
-    : customId.replace('mod_ban_cancel_', '');
+    : isBanCancel
+    ? customId.replace('mod_ban_cancel_', '')
+    : isPurgeConfirm
+    ? customId.replace('mod_purge_confirm_', '')
+    : customId.replace('mod_purge_cancel_', '');
 
   if (!interaction.guild) {
     if (!interaction.replied && !interaction.deferred) {
@@ -780,6 +988,17 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
     return;
   }
 
+  // Channel binding validation for PURGE: must match proposed channel
+  if (action.actionType === 'PURGE' && action.channelId && action.channelId !== interaction.channelId) {
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: '❌ Purge confirmation must be performed in the channel where it was proposed.',
+        ephemeral: true,
+      });
+    }
+    return;
+  }
+
   // Expiration check
   if (action.status === 'EXPIRED' || Date.now() > action.expiresAt.getTime()) {
     action.status = 'EXPIRED';
@@ -813,10 +1032,18 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
       return;
     }
 
-    const cancelTitle = action.actionType === 'BAN' ? '🚫 BAN CANCELLED' : '🚫 KICK CANCELLED';
+    const cancelTitle =
+      action.actionType === 'BAN'
+        ? '🚫 BAN CANCELLED'
+        : action.actionType === 'PURGE'
+        ? '🚫 PURGE CANCELLED'
+        : '🚫 KICK CANCELLED';
+
     const cancelDesc =
       action.actionType === 'BAN'
         ? `Ban of member **${action.targetTag}** was cancelled. No changes were made.`
+        : action.actionType === 'PURGE'
+        ? `Message purge in <#${action.channelId}> was cancelled. No messages were deleted.`
         : `Kick of member **${action.targetTag}** was cancelled. No changes were made.`;
 
     const cancelEmbed = new EmbedBuilder()
@@ -854,13 +1081,215 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
     return;
   }
 
-  // 2. Re-check bot permission based on actionType
+  // 2. Pre-execution checks based on actionType
   const botMember =
     interaction.guild.members.me ??
     (typeof interaction.guild.members.fetchMe === 'function'
       ? await interaction.guild.members.fetchMe().catch(() => null)
       : null);
 
+  if (action.actionType === 'PURGE') {
+    const purgeChannel = await interaction.guild.channels.fetch(action.channelId!).catch(() => null);
+    if (!purgeChannel || typeof (purgeChannel as any).bulkDelete !== 'function') {
+      cancelModAction(actionId, interaction.user.id, interaction.guild.id);
+      const targetChanEmbed = new EmbedBuilder()
+        .setTitle('❌ PURGE ABORTED')
+        .setDescription('The target channel could not be found or does not support message deletion.')
+        .setColor(0xed4245)
+        .setTimestamp();
+
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.update({
+          embeds: [targetChanEmbed],
+          components: [],
+        });
+      }
+      return;
+    }
+
+    let hasManageMessages = false;
+    if (botMember && typeof (purgeChannel as any).permissionsFor === 'function') {
+      const perms = (purgeChannel as any).permissionsFor(botMember);
+      hasManageMessages = Boolean(
+        perms &&
+        (perms.has(PermissionFlagsBits.ManageMessages) || perms.has('ManageMessages'))
+      );
+    } else if (botMember && botMember.permissions) {
+      hasManageMessages = Boolean(
+        botMember.permissions.has(PermissionFlagsBits.ManageMessages) ||
+        botMember.permissions.has('ManageMessages')
+      );
+    }
+
+    if (!hasManageMessages) {
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: '❌ Bot lacks the "Manage Messages" permission in this channel.',
+          ephemeral: true,
+        });
+      }
+      return;
+    }
+
+    if (
+      !action.amount ||
+      typeof action.amount !== 'number' ||
+      !Number.isInteger(action.amount) ||
+      action.amount < 1 ||
+      action.amount > MAX_PURGE_AMOUNT
+    ) {
+      cancelModAction(actionId, interaction.user.id, interaction.guild.id);
+      const invEmbed = new EmbedBuilder()
+        .setTitle('❌ PURGE ABORTED')
+        .setDescription('Invalid purge amount.')
+        .setColor(0xed4245)
+        .setTimestamp();
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.update({ embeds: [invEmbed], components: [] });
+      }
+      return;
+    }
+
+    if (!action.reason || !action.reason.trim() || action.reason.trim().length > 512) {
+      cancelModAction(actionId, interaction.user.id, interaction.guild.id);
+      const invEmbed = new EmbedBuilder()
+        .setTitle('❌ PURGE ABORTED')
+        .setDescription('Invalid purge reason.')
+        .setColor(0xed4245)
+        .setTimestamp();
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.update({ embeds: [invEmbed], components: [] });
+      }
+      return;
+    }
+
+    const confirmResult = atomicConfirmModAction(actionId, interaction.user.id, interaction.guild.id);
+    if (!confirmResult.success) {
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: `❌ ${confirmResult.error}`,
+          ephemeral: true,
+        });
+      }
+      return;
+    }
+
+    if (
+      typeof (interaction as any).deferUpdate === 'function' &&
+      !interaction.deferred &&
+      !interaction.replied
+    ) {
+      await interaction.deferUpdate();
+    }
+
+    let purgeResultMsg = '';
+    try {
+      purgeResultMsg = await runAction(interaction.guild, {
+        type: 'purgeMessages',
+        payload: {
+          guildId: interaction.guild.id,
+          channelId: action.channelId!,
+          amount: action.amount!,
+          reason: action.reason,
+        },
+      });
+    } catch (purgeErr: any) {
+      const failEmbed = new EmbedBuilder()
+        .setTitle('❌ PURGE FAILED')
+        .setDescription(`Failed to purge messages: ${purgeErr?.message || 'Unknown error'}`)
+        .setColor(0xed4245)
+        .setTimestamp();
+
+      if (interaction.deferred && typeof (interaction as any).editReply === 'function') {
+        await interaction.editReply({ embeds: [failEmbed], components: [] });
+      } else if (!interaction.replied) {
+        await interaction.update({ embeds: [failEmbed], components: [] });
+      }
+      return;
+    }
+
+    const match = purgeResultMsg.match(/Purged (\d+) of (\d+) message/);
+    const deletedCount = match ? parseInt(match[1], 10) : action.amount!;
+    const requestedCount = action.amount!;
+    const isFull = deletedCount === requestedCount;
+    const isPartial = deletedCount > 0 && deletedCount < requestedCount;
+
+    markExecuted(actionId);
+
+    const modLogsChannel = interaction.guild.channels?.cache?.find?.(
+      (c: any) =>
+        c.name?.toLowerCase() === 'mod-logs' &&
+        (c.type === ChannelType.GuildText || typeof c.send === 'function')
+    );
+
+    if (modLogsChannel && typeof (modLogsChannel as any).send === 'function') {
+      const statusString = isFull
+        ? '`EXECUTED & VERIFIED (FULL)`'
+        : isPartial
+        ? '`EXECUTED & VERIFIED (PARTIAL)`'
+        : '`EXECUTED (0 DELETED)`';
+
+      const logEmbed = new EmbedBuilder()
+        .setTitle(isFull ? '🛡️ Messages Purged' : '🛡️ Messages Partially Purged')
+        .setColor(isFull ? 0xed4245 : 0xfee75c)
+        .addFields(
+          {
+            name: 'Moderator',
+            value: `${interaction.user.tag || interaction.user.username} (<@${interaction.user.id}>)`,
+            inline: false,
+          },
+          { name: 'Action', value: '`PURGE`', inline: true },
+          { name: 'Channel', value: `<#${action.channelId}>`, inline: true },
+          { name: 'Requested Amount', value: `\`${requestedCount}\``, inline: true },
+          { name: 'Deleted Amount', value: `\`${deletedCount}\``, inline: true },
+          { name: 'Status', value: statusString, inline: true },
+          { name: 'Reason', value: action.reason, inline: false }
+        )
+        .setTimestamp();
+
+      try {
+        await (modLogsChannel as any).send({ embeds: [logEmbed] });
+      } catch (logErr) {
+        console.warn('Failed to send audit log to #mod-logs:', logErr);
+      }
+    }
+
+    const purgeTitle = isFull
+      ? '🧹 Messages Purged'
+      : deletedCount > 0
+      ? '⚠️ Messages Partially Purged'
+      : '⚠️ No Messages Purged';
+
+    const purgeColor = isFull ? 0x57f287 : 0xfee75c;
+    const purgeDesc = isFull
+      ? `Successfully purged **${deletedCount}** message(s) from <#${action.channelId}>.`
+      : deletedCount > 0
+      ? `Purged **${deletedCount}** of **${requestedCount}** requested message(s) from <#${action.channelId}>.`
+      : `0 of **${requestedCount}** requested message(s) were deleted from <#${action.channelId}>.`;
+
+    const successEmbed = new EmbedBuilder()
+      .setTitle(purgeTitle)
+      .setColor(purgeColor)
+      .setDescription(purgeDesc)
+      .addFields(
+        { name: 'Channel', value: `<#${action.channelId}>`, inline: true },
+        { name: 'Action', value: '`PURGE`', inline: true },
+        { name: 'Deleted', value: `\`${deletedCount} / ${requestedCount}\``, inline: true },
+        { name: 'Status', value: '`EXECUTED`', inline: true },
+        { name: 'Reason', value: action.reason, inline: false }
+      )
+      .setFooter({ text: `Confirmed by @${interaction.user.username}` })
+      .setTimestamp();
+
+    if (interaction.deferred && typeof (interaction as any).editReply === 'function') {
+      await interaction.editReply({ embeds: [successEmbed], components: [] });
+    } else if (!interaction.replied) {
+      await interaction.update({ embeds: [successEmbed], components: [] });
+    }
+    return;
+  }
+
+  // 2. Re-check bot permission based on actionType (for KICK and BAN)
   if (action.actionType === 'BAN') {
     const hasBanPerm =
       botMember &&
@@ -894,7 +1323,7 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
   // 3. Re-fetch target member (handle member leaving before confirmation)
   let targetMember: GuildMember | null = null;
   try {
-    targetMember = await interaction.guild.members.fetch(action.targetId);
+    targetMember = await interaction.guild.members.fetch(action.targetId!);
   } catch {
     targetMember = null;
   }
@@ -904,7 +1333,7 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
     const targetLeftEmbed = new EmbedBuilder()
       .setTitle(action.actionType === 'BAN' ? '❌ BAN ABORTED' : '❌ KICK ABORTED')
       .setDescription(
-        `Member **${action.targetTag}** is no longer in this server. The ${action.actionType.toLowerCase()} was not executed.`
+        `Member **${action.targetTag || 'Unknown'}** is no longer in this server. The ${action.actionType.toLowerCase()} was not executed.`
       )
       .setColor(0xed4245)
       .setTimestamp();
@@ -980,7 +1409,7 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
             type: 'banMember' as const,
             payload: {
               guildId: interaction.guild.id,
-              targetId: action.targetId,
+              targetId: action.targetId!,
               reason: action.reason,
             },
           }
@@ -988,7 +1417,7 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
             type: 'kickMember' as const,
             payload: {
               guildId: interaction.guild.id,
-              targetId: action.targetId,
+              targetId: action.targetId!,
               reason: action.reason,
             },
           };
@@ -1016,7 +1445,7 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
   if (action.actionType === 'BAN') {
     try {
       if (interaction.guild.bans && typeof interaction.guild.bans.fetch === 'function') {
-        const banEntry = await interaction.guild.bans.fetch(action.targetId).catch(() => null);
+        const banEntry = await interaction.guild.bans.fetch(action.targetId!).catch(() => null);
         if (banEntry) {
           verified = true;
         }
@@ -1030,7 +1459,7 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
       try {
         if (typeof interaction.guild.members.fetch === 'function') {
           const recheck = await interaction.guild.members
-            .fetch({ user: action.targetId, force: true })
+            .fetch({ user: action.targetId!, force: true })
             .catch(() => null);
           if (!recheck) {
             verified = true;
@@ -1045,7 +1474,7 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
     try {
       if (typeof interaction.guild.members.fetch === 'function') {
         const recheck = await interaction.guild.members
-          .fetch({ user: action.targetId, force: true })
+          .fetch({ user: action.targetId!, force: true })
           .catch(() => null);
         if (!recheck) {
           verified = true;
@@ -1061,8 +1490,8 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
       .setTitle(`❌ ${action.actionType} UNVERIFIED`)
       .setDescription(
         action.actionType === 'BAN'
-          ? `Target member **${action.targetTag}** could not be verified as banned from the server.`
-          : `Target member **${action.targetTag}** is still detected in the server. Kick could not be verified.`
+          ? `Target member **${action.targetTag || 'Unknown'}** could not be verified as banned from the server.`
+          : `Target member **${action.targetTag || 'Unknown'}** is still detected in the server. Kick could not be verified.`
       )
       .setColor(0xed4245)
       .setTimestamp();
@@ -1092,7 +1521,7 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
       .addFields(
         {
           name: 'Target Member',
-          value: `${action.targetTag} (<@${action.targetId}>)`,
+          value: `${action.targetTag || 'Unknown'} (<@${action.targetId}>)`,
           inline: false,
         },
         {
@@ -1117,8 +1546,8 @@ export async function handleModerationButton(interaction: ButtonInteraction): Pr
   const successTitle = action.actionType === 'BAN' ? '🔨 Member Banned' : '👢 Member Kicked';
   const successDesc =
     action.actionType === 'BAN'
-      ? `Successfully banned **${action.targetTag}** from the server.`
-      : `Successfully kicked **${action.targetTag}** from the server.`;
+      ? `Successfully banned **${action.targetTag || 'Unknown'}** from the server.`
+      : `Successfully kicked **${action.targetTag || 'Unknown'}** from the server.`;
 
   const successEmbed = new EmbedBuilder()
     .setTitle(successTitle)

@@ -58,6 +58,13 @@ export type BanMemberPayload = {
   reason: string;
 };
 
+export type PurgeMessagesPayload = {
+  guildId: string;
+  channelId: string;
+  amount: number;
+  reason: string;
+};
+
 export type DiscordAction =
   | { type: 'createRole'; payload: CreateRolePayload }
   | { type: 'createChannel'; payload: CreateChannelPayload }
@@ -69,7 +76,8 @@ export type DiscordAction =
   | { type: 'deleteRole'; payload: DeleteRolePayload }
   | { type: 'timeoutMember'; payload: TimeoutMemberPayload }
   | { type: 'kickMember'; payload: KickMemberPayload }
-  | { type: 'banMember'; payload: BanMemberPayload };
+  | { type: 'banMember'; payload: BanMemberPayload }
+  | { type: 'purgeMessages'; payload: PurgeMessagesPayload };
 
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' | 'BLOCKED';
 

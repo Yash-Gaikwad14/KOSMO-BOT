@@ -6,9 +6,11 @@ export interface PendingModAction {
   id: string;
   guildId: string;
   moderatorId: string;
-  targetId: string;
-  targetTag: string;
-  actionType: 'KICK' | 'BAN';
+  targetId?: string;
+  targetTag?: string;
+  channelId?: string;
+  amount?: number;
+  actionType: 'KICK' | 'BAN' | 'PURGE';
   reason: string;
   status: ModActionStatus;
   createdAt: Date;

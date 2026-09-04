@@ -11,8 +11,10 @@ const mockGuild = {
   channels: {
     cache: new Map(),
     create: jest.fn().mockResolvedValue(undefined),
+    fetch: jest.fn().mockImplementation(async (id: string) => (mockGuild.channels.cache as any).get(id) || null),
   },
   members: {
+    me: { id: 'bot-id' },
     fetch: jest.fn().mockResolvedValue({
       roles: {
         cache: new Map(),
@@ -667,6 +669,162 @@ describe('Discord Actions Executor (runAction)', () => {
         payload: { guildId: 'guild-1', targetId: 'user-1', reason: 'a'.repeat(513) },
       };
       await expect(runAction(mockGuild, tooLongReasonAction)).rejects.toThrow(/cannot exceed 512 characters/i);
+    });
+  });
+
+  describe('purgeMessages action execution', () => {
+    test('purges messages successfully and reports deleted count', async () => {
+      const mockChannel = {
+        id: 'chan-text-1',
+        name: 'general',
+        bulkDelete: jest.fn().mockResolvedValue({ size: 25 }),
+      };
+      (mockGuild.channels.cache as any).set('chan-text-1', mockChannel);
+
+      const action: DiscordAction = {
+        type: 'purgeMessages',
+        payload: {
+          guildId: 'guild-1',
+          channelId: 'chan-text-1',
+          amount: 25,
+          reason: 'Clearing spam messages',
+        },
+      };
+
+      const result = await runAction(mockGuild, action);
+      expect(result).toBe('Purged 25 of 25 message(s) from #general.');
+      expect(mockChannel.bulkDelete).toHaveBeenCalledWith(25, true);
+    });
+
+    test('accurately reports partial purge when older messages exist', async () => {
+      const mockChannel = {
+        id: 'chan-text-2',
+        name: 'announcements',
+        bulkDelete: jest.fn().mockResolvedValue({ size: 12 }),
+      };
+      (mockGuild.channels.cache as any).set('chan-text-2', mockChannel);
+
+      const action: DiscordAction = {
+        type: 'purgeMessages',
+        payload: {
+          guildId: 'guild-1',
+          channelId: 'chan-text-2',
+          amount: 50,
+          reason: 'Clearing old announcements',
+        },
+      };
+
+      const result = await runAction(mockGuild, action);
+      expect(result).toBe('Purged 12 of 50 message(s) from #announcements.');
+      expect(mockChannel.bulkDelete).toHaveBeenCalledWith(50, true);
+    });
+
+    test('throws when channel is not found', async () => {
+      const action: DiscordAction = {
+        type: 'purgeMessages',
+        payload: {
+          guildId: 'guild-1',
+          channelId: 'non-existent-channel',
+          amount: 10,
+          reason: 'Testing missing channel',
+        },
+      };
+
+      await expect(runAction(mockGuild, action)).rejects.toThrow('Channel "non-existent-channel" not found in server.');
+    });
+
+    test('throws when channel does not support message deletion', async () => {
+      const voiceChannel = {
+        id: 'chan-voice-1',
+        name: 'Voice Chat',
+      };
+      (mockGuild.channels.cache as any).set('chan-voice-1', voiceChannel);
+
+      const action: DiscordAction = {
+        type: 'purgeMessages',
+        payload: {
+          guildId: 'guild-1',
+          channelId: 'chan-voice-1',
+          amount: 10,
+          reason: 'Testing voice channel',
+        },
+      };
+
+      await expect(runAction(mockGuild, action)).rejects.toThrow('Target channel does not support message deletion.');
+    });
+
+    test('throws when bot lacks ManageMessages permission in target channel', async () => {
+      const restrictedChannel = {
+        id: 'chan-restricted-1',
+        name: 'restricted',
+        bulkDelete: jest.fn(),
+        permissionsFor: jest.fn().mockReturnValue({
+          has: jest.fn().mockReturnValue(false),
+        }),
+      };
+      (mockGuild.channels.cache as any).set('chan-restricted-1', restrictedChannel);
+
+      const action: DiscordAction = {
+        type: 'purgeMessages',
+        payload: {
+          guildId: 'guild-1',
+          channelId: 'chan-restricted-1',
+          amount: 10,
+          reason: 'Testing no permission',
+        },
+      };
+
+      await expect(runAction(mockGuild, action)).rejects.toThrow('Bot lacks ManageMessages permission in the target channel.');
+    });
+
+    test('rejects invalid amount (0, negative, >100, non-integer) via validator', async () => {
+      const zeroAmountAction: DiscordAction = {
+        type: 'purgeMessages',
+        payload: { guildId: 'guild-1', channelId: 'chan-1', amount: 0, reason: 'Test' },
+      };
+      await expect(runAction(mockGuild, zeroAmountAction)).rejects.toThrow(/purge amount must be an integer between 1 and 100/i);
+
+      const negAmountAction: DiscordAction = {
+        type: 'purgeMessages',
+        payload: { guildId: 'guild-1', channelId: 'chan-1', amount: -5, reason: 'Test' },
+      };
+      await expect(runAction(mockGuild, negAmountAction)).rejects.toThrow(/purge amount must be an integer between 1 and 100/i);
+
+      const overLimitAction: DiscordAction = {
+        type: 'purgeMessages',
+        payload: { guildId: 'guild-1', channelId: 'chan-1', amount: 101, reason: 'Test' },
+      };
+      await expect(runAction(mockGuild, overLimitAction)).rejects.toThrow(/purge amount must be an integer between 1 and 100/i);
+
+      const nonIntAction: DiscordAction = {
+        type: 'purgeMessages',
+        payload: { guildId: 'guild-1', channelId: 'chan-1', amount: 25.5, reason: 'Test' },
+      };
+      await expect(runAction(mockGuild, nonIntAction)).rejects.toThrow(/purge amount must be an integer between 1 and 100/i);
+    });
+
+    test('rejects empty channelId via validator', async () => {
+      const emptyChannelAction: DiscordAction = {
+        type: 'purgeMessages',
+        payload: { guildId: 'guild-1', channelId: '   ', amount: 10, reason: 'Test' },
+      };
+      await expect(runAction(mockGuild, emptyChannelAction)).rejects.toThrow(/channel id cannot be empty for purge/i);
+    });
+
+    test('rejects empty or whitespace reason via validator', async () => {
+      const emptyReasonAction: DiscordAction = {
+        type: 'purgeMessages',
+        payload: { guildId: 'guild-1', channelId: 'chan-1', amount: 10, reason: '   ' },
+      };
+      await expect(runAction(mockGuild, emptyReasonAction)).rejects.toThrow(/purge reason cannot be empty/i);
+    });
+
+    test('rejects reason exceeding 512 characters via validator', async () => {
+      const tooLongAction: DiscordAction = {
+        type: 'purgeMessages',
+        payload: { guildId: 'guild-1', channelId: 'chan-1', amount: 10, reason: 'a'.repeat(513) },
+      };
+      await expect(runAction(mockGuild, tooLongAction)).rejects.toThrow(/cannot exceed 512 characters/i);
     });
   });
 });

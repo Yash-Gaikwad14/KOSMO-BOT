@@ -97,12 +97,30 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
           if (perm === PermissionFlagsBits.BanMembers || perm === 'BanMembers') {
             return botPerm;
           }
+          if (perm === PermissionFlagsBits.ManageMessages || perm === 'ManageMessages') {
+            return botPerm;
+          }
           return false;
         }),
       },
     };
 
     const channelsMap = new Collection<string, any>();
+    const defaultChannel: any = {
+      id: 'chan-mod-1',
+      name: 'general',
+      type: ChannelType.GuildText,
+      bulkDelete: jest.fn().mockResolvedValue(new Collection()),
+      permissionsFor: jest.fn().mockReturnValue({
+        has: jest.fn().mockImplementation((perm) => {
+          if (perm === PermissionFlagsBits.ManageMessages || perm === 'ManageMessages') {
+            return botPerm;
+          }
+          return true;
+        }),
+      }),
+    };
+    channelsMap.set(defaultChannel.id, defaultChannel);
     (options.channels || []).forEach((c) => channelsMap.set(c.id, c));
 
     const membersStore = new Map<string, GuildMember>();
@@ -134,6 +152,12 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
       },
       channels: {
         cache: channelsMap,
+        fetch: jest.fn().mockImplementation(async (arg: any) => {
+          const id = typeof arg === 'string' ? arg : arg?.id;
+          const found = channelsMap.get(id);
+          if (found) return found;
+          throw new Error(`Channel "${id}" not found.`);
+        }),
       },
     };
 
@@ -142,11 +166,14 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
 
   function createMockInteraction(options: {
     guild?: Guild | null;
+    channel?: any;
+    channelId?: string;
     callerUser?: any;
     callerRoles?: Role[];
     targetUser?: User;
     targetMember?: GuildMember | null;
     duration?: any;
+    amount?: any;
     reason?: any;
     subcommand?: string;
   }) {
@@ -164,8 +191,23 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
     const callerRoles = options.callerRoles || [createMockRole('mod-role', 'Moderator', 30)];
     const callerMember = createMockMember(callerUser, callerRoles);
 
+    const channelId = options.channelId || 'chan-mod-1';
+    const channel = options.channel !== undefined
+      ? options.channel
+      : (options.guild?.channels?.cache?.get(channelId) || {
+          id: channelId,
+          name: 'general',
+          type: ChannelType.GuildText,
+          bulkDelete: jest.fn().mockResolvedValue(new Collection()),
+          permissionsFor: jest.fn().mockReturnValue({
+            has: jest.fn().mockReturnValue(true),
+          }),
+        });
+
     const interaction: any = {
       guild: options.guild !== undefined ? options.guild : null,
+      channelId,
+      channel,
       user: callerUser,
       member: callerMember,
       replied: false,
@@ -174,7 +216,10 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
         getSubcommand: jest.fn().mockReturnValue(options.subcommand || 'timeout'),
         getUser: jest.fn().mockReturnValue(options.targetUser),
         getMember: jest.fn().mockReturnValue(options.targetMember ?? null),
-        getInteger: jest.fn().mockReturnValue(options.duration),
+        getInteger: jest.fn().mockImplementation((name?: string) => {
+          if (name === 'amount') return options.amount;
+          return options.duration;
+        }),
         getString: jest.fn().mockReturnValue(options.reason),
       },
       reply: jest.fn().mockImplementation(async (payload) => {
@@ -194,6 +239,8 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
   function createMockButtonInteraction(options: {
     customId: string;
     guild?: Guild | null;
+    channelId?: string;
+    channel?: any;
     user?: any;
     member?: any;
   }) {
@@ -208,9 +255,24 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
       ...options.user,
     };
 
+    const channelId = options.channelId || 'chan-mod-1';
+    const channel = options.channel !== undefined
+      ? options.channel
+      : (options.guild?.channels?.cache?.get(channelId) || {
+          id: channelId,
+          name: 'general',
+          type: ChannelType.GuildText,
+          bulkDelete: jest.fn().mockResolvedValue(new Collection()),
+          permissionsFor: jest.fn().mockReturnValue({
+            has: jest.fn().mockReturnValue(true),
+          }),
+        });
+
     const interaction: any = {
       customId: options.customId,
       guild: options.guild !== undefined ? options.guild : null,
+      channelId,
+      channel,
       user,
       member: options.member || createMockMember(user, [createMockRole('mod-role', 'Moderator', 30)]),
       replied: false,
@@ -283,6 +345,19 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
       const reasonOpt = banSub.options.find((o: any) => o.name === 'reason');
 
       expect(userOpt?.required).toBe(true);
+      expect(reasonOpt?.required).toBe(true);
+    });
+
+    test('command defines "purge" subcommand with amount and reason options', () => {
+      const purgeSub = data.options.find((opt: any) => opt.name === 'purge') as any;
+      expect(purgeSub).toBeDefined();
+
+      const amountOpt = purgeSub.options.find((o: any) => o.name === 'amount');
+      const reasonOpt = purgeSub.options.find((o: any) => o.name === 'reason');
+
+      expect(amountOpt?.required).toBe(true);
+      expect(amountOpt?.min_value).toBe(1);
+      expect(amountOpt?.max_value).toBe(100);
       expect(reasonOpt?.required).toBe(true);
     });
 
@@ -2350,6 +2425,848 @@ describe('Phase 4D.1 /mod timeout & Phase 4D.2 /mod kick Moderation Commands', (
           })
         );
         expect(targetMember.ban).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  // =========================================================================
+  // 5. PHASE 4D.3B /MOD PURGE TESTS
+  // =========================================================================
+  describe('Phase 4D.3B /mod purge Command & Confirmation Workflow', () => {
+    describe('Command Preconditions & Guards', () => {
+      test('rejects purge invocation outside of a guild (e.g. DM)', async () => {
+        const { interaction } = createMockInteraction({
+          guild: null,
+          subcommand: 'purge',
+          amount: 10,
+          reason: 'DM test',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: 'Command must be used in a guild.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects purge if caller lacks Category.MODERATE authorization', async () => {
+        const guild = createMockGuild();
+        const unprivilegedCaller = createMockUser({ id: 'unauth-caller-1' });
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          callerUser: unprivilegedCaller,
+          callerRoles: [],
+          amount: 25,
+          reason: 'Unauthorized purge attempt',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ You are not authorized to use moderation commands.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects purge if bot lacks ManageMessages permission in target channel', async () => {
+        const guild = createMockGuild();
+        const restrictedChannel: any = {
+          id: 'chan-restricted',
+          name: 'restricted',
+          type: ChannelType.GuildText,
+          bulkDelete: jest.fn().mockResolvedValue(new Collection()),
+          permissionsFor: jest.fn().mockReturnValue({
+            has: jest.fn().mockReturnValue(false), // bot has NO ManageMessages
+          }),
+        };
+        (guild.channels.cache as Collection<string, any>).set(restrictedChannel.id, restrictedChannel);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          channelId: restrictedChannel.id,
+          channel: restrictedChannel,
+          amount: 15,
+          reason: 'No perm purge test',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ Bot lacks the "Manage Messages" permission in this channel.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects purge if channel is not a guild text channel supporting bulkDelete', async () => {
+        const guild = createMockGuild();
+        const voiceChannel: any = {
+          id: 'chan-voice-1',
+          name: 'voice-room',
+          type: ChannelType.GuildVoice,
+          bulkDelete: undefined, // does NOT support bulkDelete
+          permissionsFor: jest.fn().mockReturnValue({
+            has: jest.fn().mockReturnValue(true),
+          }),
+        };
+        (guild.channels.cache as Collection<string, any>).set(voiceChannel.id, voiceChannel);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          channelId: voiceChannel.id,
+          channel: voiceChannel,
+          amount: 10,
+          reason: 'Voice channel purge attempt',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ This channel does not support message deletion.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects purge if channel cannot be resolved', async () => {
+        const guild = createMockGuild();
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          channelId: 'missing-chan',
+          channel: null,
+          amount: 10,
+          reason: 'Null channel test',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ This channel does not support message deletion.',
+          ephemeral: true,
+        });
+      });
+    });
+
+    describe('Amount & Reason Validation', () => {
+      test('rejects amount <= 0', async () => {
+        const guild = createMockGuild();
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 0,
+          reason: 'Zero amount',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ Purge amount must be an integer between 1 and 100.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects negative amount', async () => {
+        const guild = createMockGuild();
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: -5,
+          reason: 'Negative amount',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ Purge amount must be an integer between 1 and 100.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects amount > 100 without silent clamping', async () => {
+        const guild = createMockGuild();
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 150,
+          reason: 'Over limit amount',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ Purge amount must be an integer between 1 and 100.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects non-integer amount', async () => {
+        const guild = createMockGuild();
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 12.5,
+          reason: 'Non-integer amount',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ Purge amount must be an integer between 1 and 100.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects empty or whitespace-only reason', async () => {
+        const guild = createMockGuild();
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 10,
+          reason: '   ',
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ A valid reason must be provided for the purge.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects reason exceeding 512 characters', async () => {
+        const guild = createMockGuild();
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 10,
+          reason: 'A'.repeat(513),
+        });
+
+        await execute(interaction as any);
+
+        expect(interaction.reply).toHaveBeenCalledWith({
+          content: '❌ Purge reason cannot exceed 512 characters.',
+          ephemeral: true,
+        });
+      });
+
+      test('accepts boundary amount 1', async () => {
+        const guild = createMockGuild();
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 1,
+          reason: 'Minimum boundary test',
+        });
+
+        await execute(interaction as any);
+
+        const replyData = interaction.getReplyData();
+        expect(replyData.embeds[0].data.title).toBe('⚠️ CONFIRM MESSAGE PURGE');
+      });
+
+      test('accepts boundary amount 100', async () => {
+        const guild = createMockGuild();
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 100,
+          reason: 'Maximum boundary test',
+        });
+
+        await execute(interaction as any);
+
+        const replyData = interaction.getReplyData();
+        expect(replyData.embeds[0].data.title).toBe('⚠️ CONFIRM MESSAGE PURGE');
+      });
+    });
+
+    describe('Proposal Flow & Confirmation Presentation', () => {
+      test('creates proposal without deleting any messages immediately', async () => {
+        const guild = createMockGuild();
+        const targetChannel = guild.channels.cache.get('chan-mod-1') as any;
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 42,
+          reason: 'Spam attack cleanup',
+        });
+
+        await execute(interaction as any);
+
+        // Crucial invariant: NO messages deleted during proposal creation!
+        expect(targetChannel.bulkDelete).not.toHaveBeenCalled();
+
+        const replyData = interaction.getReplyData();
+
+        const embed = replyData.embeds[0].data;
+        expect(embed.title).toBe('⚠️ CONFIRM MESSAGE PURGE');
+        expect(embed.description).toContain('42');
+        expect(embed.description).toContain('destructive');
+
+        const channelField = embed.fields.find((f: any) => f.name === 'Channel');
+        expect(channelField.value).toContain('chan-mod-1');
+
+        const amountField = embed.fields.find((f: any) => f.name === 'Requested Amount');
+        expect(amountField.value).toBe('`42 messages`');
+
+        const reasonField = embed.fields.find((f: any) => f.name === 'Reason');
+        expect(reasonField.value).toBe('Spam attack cleanup');
+
+        const row = replyData.components[0];
+        expect(row.components).toHaveLength(2);
+
+        const confirmBtn = row.components[0].data;
+        const cancelBtn = row.components[1].data;
+
+        expect(confirmBtn.custom_id).toMatch(/^mod_purge_confirm_/);
+        expect(confirmBtn.label).toBe('Confirm Purge');
+        expect(cancelBtn.custom_id).toMatch(/^mod_purge_cancel_/);
+        expect(cancelBtn.label).toBe('Cancel');
+
+        const actionId = confirmBtn.custom_id.replace('mod_purge_confirm_', '');
+        const pending = getPendingModAction(actionId);
+        expect(pending).toBeDefined();
+        expect(pending?.actionType).toBe('PURGE');
+        expect(pending?.channelId).toBe('chan-mod-1');
+        expect(pending?.amount).toBe(42);
+        expect(pending?.reason).toBe('Spam attack cleanup');
+        expect(pending?.status).toBe('PENDING');
+      });
+    });
+
+    describe('Channel Binding & Security', () => {
+      test('rejects confirmation if clicked from a different channel', async () => {
+        const guild = createMockGuild();
+        const otherChannel: any = {
+          id: 'chan-other-2',
+          name: 'other-channel',
+          type: ChannelType.GuildText,
+          bulkDelete: jest.fn().mockResolvedValue(new Collection()),
+          permissionsFor: jest.fn().mockReturnValue({
+            has: jest.fn().mockReturnValue(true),
+          }),
+        };
+        (guild.channels.cache as Collection<string, any>).set(otherChannel.id, otherChannel);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          channelId: 'chan-mod-1',
+          amount: 30,
+          reason: 'Cross-channel security test',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+
+        // Button clicked from a different channel
+        const crossChannelClick = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          channelId: 'chan-other-2',
+          channel: otherChannel,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(crossChannelClick as any);
+
+        expect(crossChannelClick.reply).toHaveBeenCalledWith({
+          content: '❌ Purge confirmation must be performed in the channel where it was proposed.',
+          ephemeral: true,
+        });
+
+        // Original channel bulkDelete must NOT have been called
+        const origChannel = guild.channels.cache.get('chan-mod-1') as any;
+        expect(origChannel.bulkDelete).not.toHaveBeenCalled();
+        expect(otherChannel.bulkDelete).not.toHaveBeenCalled();
+      });
+
+      test('rejects cancellation if clicked from a different channel', async () => {
+        const guild = createMockGuild();
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          channelId: 'chan-mod-1',
+          amount: 20,
+          reason: 'Cross-channel cancel test',
+        });
+        await execute(interaction as any);
+
+        const cancelCustomId = interaction.getReplyData().components[0].components[1].data.custom_id;
+
+        const crossChannelClick = createMockButtonInteraction({
+          customId: cancelCustomId,
+          guild,
+          channelId: 'chan-other-2',
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(crossChannelClick as any);
+
+        expect(crossChannelClick.reply).toHaveBeenCalledWith({
+          content: '❌ Purge confirmation must be performed in the channel where it was proposed.',
+          ephemeral: true,
+        });
+      });
+    });
+
+    describe('Confirmation Authorization & Lifecycle', () => {
+      test('rejects confirmation by a different moderator', async () => {
+        const guild = createMockGuild();
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 10,
+          reason: 'Different mod test',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+
+        const otherModClick = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'other-mod-2', username: 'OtherMod' },
+        });
+
+        await handleModerationButton(otherModClick as any);
+
+        expect(otherModClick.reply).toHaveBeenCalledWith({
+          content: '❌ Only the moderator who initiated this action can confirm or cancel it.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects interaction from a different guild', async () => {
+        const guild = createMockGuild();
+        const otherGuild = createMockGuild();
+        otherGuild.id = 'guild-different-999';
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 10,
+          reason: 'Wrong guild test',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+
+        const wrongGuildClick = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild: otherGuild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(wrongGuildClick as any);
+
+        expect(wrongGuildClick.reply).toHaveBeenCalledWith({
+          content: '❌ Moderation action does not belong to this server.',
+          ephemeral: true,
+        });
+      });
+
+      test('rejects confirmation if pending action has expired', async () => {
+        const guild = createMockGuild();
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 10,
+          reason: 'Expiry test',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+        const actionId = confirmCustomId.replace('mod_purge_confirm_', '');
+
+        // Fast-forward 6 minutes past 5-min TTL
+        const realDateNow = Date.now;
+        Date.now = () => realDateNow() + 6 * 60 * 1000;
+
+        try {
+          const expiredClick = createMockButtonInteraction({
+            customId: confirmCustomId,
+            guild,
+            user: { id: 'mod-caller-1', username: 'ModCaller' },
+          });
+
+          await handleModerationButton(expiredClick as any);
+
+          expect(expiredClick.reply).toHaveBeenCalledWith(
+            expect.objectContaining({
+              content: expect.stringMatching(/has expired/i),
+              ephemeral: true,
+            })
+          );
+        } finally {
+          Date.now = realDateNow;
+        }
+      });
+
+      test('cancels purge cleanly and prevents subsequent execution', async () => {
+        const guild = createMockGuild();
+        const targetChannel = guild.channels.cache.get('chan-mod-1') as any;
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 15,
+          reason: 'Cancellation test',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+        const cancelCustomId = interaction.getReplyData().components[0].components[1].data.custom_id;
+        const actionId = confirmCustomId.replace('mod_purge_confirm_', '');
+
+        // Click Cancel
+        const cancelClick = createMockButtonInteraction({
+          customId: cancelCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+        await handleModerationButton(cancelClick as any);
+
+        const updateData = cancelClick.getUpdateData();
+        expect(updateData.embeds[0].data.title).toBe('🚫 PURGE CANCELLED');
+        expect(updateData.components).toEqual([]);
+
+        expect(targetChannel.bulkDelete).not.toHaveBeenCalled();
+
+        const pending = getPendingModAction(actionId);
+        expect(pending?.status).toBe('CANCELLED');
+
+        // Subsequent attempt to confirm must be rejected
+        const confirmClick = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+        await handleModerationButton(confirmClick as any);
+
+        expect(confirmClick.reply).toHaveBeenCalledWith(
+          expect.objectContaining({
+            content: expect.stringMatching(/has already been cancelled/i),
+            ephemeral: true,
+          })
+        );
+        expect(targetChannel.bulkDelete).not.toHaveBeenCalled();
+      });
+
+      test('replay protection: cannot execute confirmed action twice', async () => {
+        const guild = createMockGuild();
+        const targetChannel = guild.channels.cache.get('chan-mod-1') as any;
+        const deletedCollection = new Collection();
+        for (let i = 0; i < 20; i++) deletedCollection.set(`msg-${i}`, { id: `msg-${i}` });
+        targetChannel.bulkDelete = jest.fn().mockResolvedValue(deletedCollection);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 20,
+          reason: 'Double click replay protection test',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+
+        // First click
+        const click1 = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+        await handleModerationButton(click1 as any);
+
+        expect(targetChannel.bulkDelete).toHaveBeenCalledTimes(1);
+
+        // Second click
+        const click2 = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+        await handleModerationButton(click2 as any);
+
+        expect(click2.reply).toHaveBeenCalledWith(
+          expect.objectContaining({
+            content: expect.stringMatching(/already been executed/i),
+            ephemeral: true,
+          })
+        );
+        expect(targetChannel.bulkDelete).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('Revalidation at Confirmation Time', () => {
+      test('rejects confirmation if moderator loses Category.MODERATE role', async () => {
+        const guild = createMockGuild();
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 10,
+          reason: 'Role demotion test',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+
+        // Moderator member stripped of roles
+        const demotedUser = createMockUser({ id: 'mod-caller-1', username: 'ModCaller' });
+        const demotedMember = createMockMember(demotedUser, []);
+
+        const confirmClick = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          member: demotedMember,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(confirmClick as any);
+
+        expect(confirmClick.reply).toHaveBeenCalledWith({
+          content: '❌ You are no longer authorized to execute moderation commands.',
+          ephemeral: true,
+        });
+
+        const targetChannel = guild.channels.cache.get('chan-mod-1') as any;
+        expect(targetChannel.bulkDelete).not.toHaveBeenCalled();
+      });
+
+      test('rejects confirmation if bot loses ManageMessages permission', async () => {
+        const guild = createMockGuild();
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 10,
+          reason: 'Bot perm lost test',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+
+        const targetChannel = guild.channels.cache.get('chan-mod-1') as any;
+        // Revoke bot permission
+        targetChannel.permissionsFor = jest.fn().mockReturnValue({
+          has: jest.fn().mockReturnValue(false),
+        });
+
+        const confirmClick = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(confirmClick as any);
+
+        expect(confirmClick.reply).toHaveBeenCalledWith({
+          content: '❌ Bot lacks the "Manage Messages" permission in this channel.',
+          ephemeral: true,
+        });
+        expect(targetChannel.bulkDelete).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('Action Execution, Verification & Logging', () => {
+      test('full success purge executes cleanly, marks EXECUTED, and logs to #mod-logs', async () => {
+        const modLogsChannel: any = {
+          id: 'chan-mod-logs-1',
+          name: 'mod-logs',
+          type: ChannelType.GuildText,
+          send: jest.fn().mockResolvedValue({ id: 'log-msg-1' }),
+        };
+        const guild = createMockGuild({ channels: [modLogsChannel] });
+        const targetChannel = guild.channels.cache.get('chan-mod-1') as any;
+
+        const deletedMap = new Collection();
+        for (let i = 0; i < 25; i++) deletedMap.set(`m-${i}`, { id: `m-${i}` });
+        targetChannel.bulkDelete = jest.fn().mockResolvedValue(deletedMap);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 25,
+          reason: 'Mass spam cleanup',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+        const actionId = confirmCustomId.replace('mod_purge_confirm_', '');
+
+        const confirmClick = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(confirmClick as any);
+
+        // Verification of execution
+        expect(targetChannel.bulkDelete).toHaveBeenCalledWith(25, true);
+
+        // Verification of response
+        const updateData = confirmClick.getUpdateData();
+        expect(updateData.embeds[0].data.title).toBe('🧹 Messages Purged');
+        expect(updateData.embeds[0].data.description).toContain('Successfully purged **25** message(s)');
+        expect(updateData.components).toEqual([]);
+
+        // Verification of mod confirmation status
+        const completed = getPendingModAction(actionId);
+        expect(completed?.status).toBe('EXECUTED');
+
+        // Verification of #mod-logs
+        expect(modLogsChannel.send).toHaveBeenCalledWith(
+          expect.objectContaining({
+            embeds: expect.arrayContaining([
+              expect.objectContaining({
+                data: expect.objectContaining({
+                  title: '🛡️ Messages Purged',
+                  fields: expect.arrayContaining([
+                    expect.objectContaining({ name: 'Action', value: '`PURGE`' }),
+                    expect.objectContaining({ name: 'Requested Amount', value: '`25`' }),
+                    expect.objectContaining({ name: 'Deleted Amount', value: '`25`' }),
+                    expect.objectContaining({ name: 'Status', value: '`EXECUTED & VERIFIED (FULL)`' }),
+                    expect.objectContaining({ name: 'Reason', value: 'Mass spam cleanup' }),
+                  ]),
+                }),
+              }),
+            ]),
+          })
+        );
+      });
+
+      test('partial purge accurately reports deleted count and logs PARTIAL status', async () => {
+        const modLogsChannel: any = {
+          id: 'chan-mod-logs-1',
+          name: 'mod-logs',
+          type: ChannelType.GuildText,
+          send: jest.fn().mockResolvedValue({ id: 'log-msg-1' }),
+        };
+        const guild = createMockGuild({ channels: [modLogsChannel] });
+        const targetChannel = guild.channels.cache.get('chan-mod-1') as any;
+
+        // Requested 50, but only 18 available/eligible
+        const deletedMap = new Collection();
+        for (let i = 0; i < 18; i++) deletedMap.set(`m-${i}`, { id: `m-${i}` });
+        targetChannel.bulkDelete = jest.fn().mockResolvedValue(deletedMap);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 50,
+          reason: 'Old messages purge partial test',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+        const actionId = confirmCustomId.replace('mod_purge_confirm_', '');
+
+        const confirmClick = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(confirmClick as any);
+
+        // Response reflects partial success
+        const updateData = confirmClick.getUpdateData();
+        expect(updateData.embeds[0].data.title).toBe('⚠️ Messages Partially Purged');
+        expect(updateData.embeds[0].data.description).toContain('Purged **18** of **50** requested message(s)');
+
+        // Action is marked EXECUTED since deletion succeeded partially
+        const completed = getPendingModAction(actionId);
+        expect(completed?.status).toBe('EXECUTED');
+
+        // #mod-logs reflects partial success
+        expect(modLogsChannel.send).toHaveBeenCalledWith(
+          expect.objectContaining({
+            embeds: expect.arrayContaining([
+              expect.objectContaining({
+                data: expect.objectContaining({
+                  title: '🛡️ Messages Partially Purged',
+                  fields: expect.arrayContaining([
+                    expect.objectContaining({ name: 'Action', value: '`PURGE`' }),
+                    expect.objectContaining({ name: 'Requested Amount', value: '`50`' }),
+                    expect.objectContaining({ name: 'Deleted Amount', value: '`18`' }),
+                    expect.objectContaining({ name: 'Status', value: '`EXECUTED & VERIFIED (PARTIAL)`' }),
+                  ]),
+                }),
+              }),
+            ]),
+          })
+        );
+      });
+
+      test('Discord API error reports failure and does not mark action EXECUTED', async () => {
+        const guild = createMockGuild();
+        const targetChannel = guild.channels.cache.get('chan-mod-1') as any;
+        targetChannel.bulkDelete = jest.fn().mockRejectedValue(new Error('Discord API 500: Internal Server Error'));
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 30,
+          reason: 'Discord API failure test',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+        const actionId = confirmCustomId.replace('mod_purge_confirm_', '');
+
+        const confirmClick = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(confirmClick as any);
+
+        const updateData = confirmClick.getUpdateData();
+        expect(updateData.embeds[0].data.title).toBe('❌ PURGE FAILED');
+        expect(updateData.embeds[0].data.description).toContain('Discord API 500: Internal Server Error');
+
+        const pending = getPendingModAction(actionId);
+        expect(pending?.status).not.toBe('EXECUTED');
+      });
+
+      test('moderation still succeeds when #mod-logs channel is absent', async () => {
+        const guild = createMockGuild({ channels: [] }); // NO #mod-logs
+        const targetChannel = guild.channels.cache.get('chan-mod-1') as any;
+        const deletedMap = new Collection();
+        deletedMap.set('m-1', { id: 'm-1' });
+        targetChannel.bulkDelete = jest.fn().mockResolvedValue(deletedMap);
+
+        const { interaction } = createMockInteraction({
+          guild,
+          subcommand: 'purge',
+          amount: 1,
+          reason: 'No log channel purge test',
+        });
+        await execute(interaction as any);
+
+        const confirmCustomId = interaction.getReplyData().components[0].components[0].data.custom_id;
+        const actionId = confirmCustomId.replace('mod_purge_confirm_', '');
+
+        const confirmClick = createMockButtonInteraction({
+          customId: confirmCustomId,
+          guild,
+          user: { id: 'mod-caller-1', username: 'ModCaller' },
+        });
+
+        await handleModerationButton(confirmClick as any);
+
+        const updateData = confirmClick.getUpdateData();
+        expect(updateData.embeds[0].data.title).toBe('🧹 Messages Purged');
+
+        const completed = getPendingModAction(actionId);
+        expect(completed?.status).toBe('EXECUTED');
       });
     });
   });

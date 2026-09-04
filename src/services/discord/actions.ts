@@ -1,4 +1,4 @@
-import { Guild, GuildChannel, Role, TextChannel, VoiceChannel, CategoryChannel, ChannelType } from 'discord.js';
+import { Guild, GuildChannel, Role, TextChannel, VoiceChannel, CategoryChannel, ChannelType, PermissionFlagsBits } from 'discord.js';
 import { findRole, findChannel, findCategory } from './lookup';
 import { validateAction, hasPrivilegedRole } from './permissionValidator';
 import { DiscordAction } from './types';
@@ -165,6 +165,53 @@ export async function runAction(guild: Guild, action: DiscordAction): Promise<st
       }
       await member.ban({ reason });
       return `Banned member ${member.user?.tag || member.displayName || targetId}.`;
+    }
+    case 'purgeMessages': {
+      const { channelId, amount, reason } = action.payload;
+      if (!channelId?.trim()) {
+        throw new Error('Channel ID cannot be empty for purge.');
+      }
+      if (typeof amount !== 'number' || !Number.isInteger(amount) || amount < 1 || amount > 100) {
+        throw new Error('Purge amount must be an integer between 1 and 100.');
+      }
+      if (!reason?.trim()) {
+        throw new Error('Purge reason cannot be empty.');
+      }
+      if (reason.trim().length > 512) {
+        throw new Error('Purge reason cannot exceed 512 characters.');
+      }
+
+      const channel = await guild.channels.fetch(channelId).catch(() => null);
+      if (!channel) {
+        throw new Error(`Channel "${channelId}" not found in server.`);
+      }
+      if (typeof (channel as any).bulkDelete !== 'function') {
+        throw new Error('Target channel does not support message deletion.');
+      }
+
+      const botMember =
+        guild.members.me ??
+        (typeof guild.members.fetchMe === 'function'
+          ? await guild.members.fetchMe().catch(() => null)
+          : null);
+      if (botMember && typeof (channel as any).permissionsFor === 'function') {
+        const perms = (channel as any).permissionsFor(botMember);
+        if (
+          perms &&
+          !perms.has(PermissionFlagsBits.ManageMessages) &&
+          !perms.has('ManageMessages')
+        ) {
+          throw new Error('Bot lacks ManageMessages permission in the target channel.');
+        }
+      }
+
+      const deleted = await (channel as any).bulkDelete(amount, true);
+      const deletedCount =
+        typeof deleted === 'number'
+          ? deleted
+          : deleted?.size ?? (Array.isArray(deleted) ? deleted.length : 0);
+      const channelName = (channel as any).name || channelId;
+      return `Purged ${deletedCount} of ${amount} message(s) from #${channelName}.`;
     }
     default:
       throw new Error('Unknown action type');

@@ -203,6 +203,18 @@ export function validateAction(guild: Guild, action: DiscordAction): void {
       }
     }
   }
+
+  if (action.type === 'purgeMessages' && guild) {
+    if (!action.payload.channelId) {
+      throw new Error('Channel ID cannot be empty for purge.');
+    }
+    const channel = guild.channels.cache?.get?.(action.payload.channelId);
+    if (channel) {
+      if (typeof (channel as any).bulkDelete !== 'function') {
+        throw new Error('Target channel does not support message deletion.');
+      }
+    }
+  }
 }
 
 /**
@@ -359,6 +371,24 @@ export class PermissionValidator {
           errors.push('Ban reason cannot be empty.');
         } else if (reason.length > 512) {
           errors.push('Ban reason cannot exceed 512 characters.');
+        }
+        break;
+      }
+
+      case 'purgeMessages': {
+        const channelId = action.payload.channelId?.trim() || '';
+        if (!channelId) {
+          errors.push('Channel ID cannot be empty for purge.');
+        }
+        const amount = action.payload.amount;
+        if (typeof amount !== 'number' || !Number.isInteger(amount) || amount < 1 || amount > 100) {
+          errors.push('Purge amount must be an integer between 1 and 100.');
+        }
+        const reason = action.payload.reason?.trim() || '';
+        if (!reason) {
+          errors.push('Purge reason cannot be empty.');
+        } else if (reason.length > 512) {
+          errors.push('Purge reason cannot exceed 512 characters.');
         }
         break;
       }
