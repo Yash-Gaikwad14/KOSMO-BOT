@@ -51,8 +51,14 @@ Supported Action Types & Payloads:
 2. createChannel:
    - "name": concrete channel name string
    - "type": "GUILD_TEXT" or "GUILD_VOICE" or "GUILD_CATEGORY"
-   - "category": (optional) concrete name of the existing parent category to place this channel inside (e.g. when requested "inside", "under", or "in" a category)
-   Note: "category" must refer to an EXISTING Discord category. Do not invent category IDs or automatically create missing categories. Preserve user-requested category parenting.
+   - "category": (optional) concrete name of the parent category to place this channel inside (e.g. when requested "inside", "under", or "in" a category)
+   CATEGORY RULES:
+   - "category" must refer to either:
+     1. An EXISTING category in the Discord server, OR
+     2. A category created earlier in the SAME plan using createChannel with type "GUILD_CATEGORY".
+   - The actions array is strictly ordered. If a plan creates a new category and child channels inside it, the category creation action MUST appear before the child channels referencing it.
+   - Do NOT invent category IDs or Discord IDs. Use the category name string, because the executor resolves parent categories by name.
+   - Preserve user-requested category parenting.
 3. assignRole:
    - "roleName": concrete role name string
    - "memberId": concrete Discord user ID string
@@ -73,6 +79,37 @@ Example of VALID output:
       "payload": {
         "name": "test-channel",
         "type": "GUILD_TEXT"
+      }
+    }
+  ]
+}
+
+Example of VALID category and child channels setup:
+{
+  "planName": "Onboarding Setup",
+  "explanation": "Create Onboarding category and child channels",
+  "actions": [
+    {
+      "type": "createChannel",
+      "payload": {
+        "name": "Onboarding",
+        "type": "GUILD_CATEGORY"
+      }
+    },
+    {
+      "type": "createChannel",
+      "payload": {
+        "name": "welcome",
+        "type": "GUILD_TEXT",
+        "category": "Onboarding"
+      }
+    },
+    {
+      "type": "createChannel",
+      "payload": {
+        "name": "introductions",
+        "type": "GUILD_TEXT",
+        "category": "Onboarding"
       }
     }
   ]
@@ -227,6 +264,24 @@ export class NLManager {
     });
 
     const validation = PermissionValidator.validateActions(rawActions);
+
+    const supportedActionTypes = [
+      'createRole',
+      'createChannel',
+      'assignRole',
+      'removeRole',
+      'applyPermissionTemplate',
+      'deleteChannel',
+      'deleteCategory',
+      'deleteRole',
+    ];
+
+    for (const act of rawActions) {
+      if (!act || !act.type || !supportedActionTypes.includes(act.type)) {
+        validation.valid = false;
+        validation.errors.push(`Unsupported action type: ${(act as any)?.type}`);
+      }
+    }
 
     // 5. Create Plan
     const planName = parsed.planName || `Plan for: ${instruction.substring(0, 30)}...`;

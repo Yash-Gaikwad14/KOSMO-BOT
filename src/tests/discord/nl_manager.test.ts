@@ -891,4 +891,330 @@ Hope this helps!`;
       expect(result.plan?.riskLevel).toBe('BLOCKED');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // TEST 10 — Phase 4A Community Setup Workflows
+  // -------------------------------------------------------------------------
+  describe('TEST 10: Phase 4A Community Setup Workflows', () => {
+    test('10a: Create onboarding area with category and child channels in same plan', async () => {
+      const mockResponse = JSON.stringify({
+        planName: 'Onboarding Area Setup',
+        explanation: 'Create Onboarding category with welcome and introductions channels',
+        actions: [
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'Onboarding',
+              type: 'GUILD_CATEGORY',
+            },
+          },
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'welcome',
+              type: 'GUILD_TEXT',
+              category: 'Onboarding',
+            },
+          },
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'introductions',
+              type: 'GUILD_TEXT',
+              category: 'Onboarding',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockResponse);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Create an onboarding area with a category called Onboarding, a welcome channel and an introductions channel inside it.',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.status).toBe('PROPOSED');
+      expect(result.plan?.actions).toHaveLength(3);
+
+      const act1 = result.plan?.actions[0];
+      expect(act1?.type).toBe('createChannel');
+      if (act1?.type === 'createChannel') {
+        expect(act1.payload.name).toBe('Onboarding');
+        expect(act1.payload.type).toBe('GUILD_CATEGORY');
+      }
+
+      const act2 = result.plan?.actions[1];
+      expect(act2?.type).toBe('createChannel');
+      if (act2?.type === 'createChannel') {
+        expect(act2.payload.name).toBe('welcome');
+        expect(act2.payload.type).toBe('GUILD_TEXT');
+        expect(act2.payload.category).toBe('Onboarding');
+      }
+
+      const act3 = result.plan?.actions[2];
+      expect(act3?.type).toBe('createChannel');
+      if (act3?.type === 'createChannel') {
+        expect(act3.payload.name).toBe('introductions');
+        expect(act3.payload.type).toBe('GUILD_TEXT');
+        expect(act3.payload.category).toBe('Onboarding');
+      }
+
+      expect(result.validation.valid).toBe(true);
+      expect(result.validation.blocked).toBe(false);
+      expect(result.plan?.riskLevel).toBe('LOW');
+    });
+
+    test('10b: Multiple channels can be placed inside an existing category', async () => {
+      const mockResponse = JSON.stringify({
+        planName: 'Setup channels in KOSMO Testing category',
+        explanation: 'Create tests and results channels in existing KOSMO Testing category',
+        actions: [
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'bot-tests',
+              type: 'GUILD_TEXT',
+              category: 'KOSMO Testing',
+            },
+          },
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'test-results',
+              type: 'GUILD_TEXT',
+              category: 'KOSMO Testing',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockResponse);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Create bot-tests and test-results inside KOSMO Testing',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.actions).toHaveLength(2);
+
+      const act1 = result.plan?.actions[0];
+      const act2 = result.plan?.actions[1];
+
+      expect(act1?.type).toBe('createChannel');
+      if (act1?.type === 'createChannel') {
+        expect(act1.payload.category).toBe('KOSMO Testing');
+      }
+
+      expect(act2?.type).toBe('createChannel');
+      if (act2?.type === 'createChannel') {
+        expect(act2.payload.category).toBe('KOSMO Testing');
+      }
+
+      expect(result.validation.valid).toBe(true);
+      expect(result.validation.blocked).toBe(false);
+    });
+
+    test('10c: Normal community setup can contain multiple safe action types', async () => {
+      const mockResponse = JSON.stringify({
+        planName: 'Community Onboarding Setup',
+        explanation: 'Create Contributor role and Resources category with faq channel',
+        actions: [
+          {
+            type: 'createRole',
+            payload: {
+              name: 'Contributor',
+              color: 0x2ecc71,
+              hoist: true,
+            },
+          },
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'Resources',
+              type: 'GUILD_CATEGORY',
+            },
+          },
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'faq',
+              type: 'GUILD_TEXT',
+              category: 'Resources',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockResponse);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Create Contributor role and Resources category with faq channel',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.status).toBe('PROPOSED');
+      expect(result.plan?.actions).toHaveLength(3);
+      expect(result.validation.valid).toBe(true);
+      expect(result.validation.blocked).toBe(false);
+      expect(result.plan?.riskLevel).toBe('LOW');
+    });
+
+    test('10d: Phase 3 safety rules still apply to Phase 4A setup requests', async () => {
+      const mockResponse = JSON.stringify({
+        planName: 'Setup with Privileged Role Violation',
+        explanation: 'Create Onboarding category, welcome channel, and Founder role',
+        actions: [
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'Onboarding',
+              type: 'GUILD_CATEGORY',
+            },
+          },
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'welcome',
+              type: 'GUILD_TEXT',
+              category: 'Onboarding',
+            },
+          },
+          {
+            type: 'createRole',
+            payload: {
+              name: 'Founder',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockResponse);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Create Onboarding category with welcome channel and Founder role',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.validation.blocked).toBe(true);
+      expect(result.plan?.riskLevel).toBe('BLOCKED');
+      expect(result.plan?.status).toBe('REJECTED');
+
+      const reasons = result.validation.blockedReasons || [];
+      expect(reasons.some((r) => r.toLowerCase().includes('privileged role'))).toBe(true);
+    });
+
+    test('10e: Category aliases parent and categoryName normalize to category', async () => {
+      const mockResponse = JSON.stringify({
+        planName: 'Setup with Aliased Category Fields',
+        explanation: 'Create channels using parent and categoryName aliases',
+        actions: [
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'channel-parent',
+              type: 'GUILD_TEXT',
+              parent: 'Onboarding',
+            },
+          },
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'channel-catname',
+              type: 'GUILD_TEXT',
+              categoryName: 'Onboarding',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockResponse);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Create channel-parent and channel-catname under Onboarding',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.actions).toHaveLength(2);
+
+      const act1 = result.plan?.actions[0];
+      const act2 = result.plan?.actions[1];
+
+      expect(act1?.type).toBe('createChannel');
+      if (act1?.type === 'createChannel') {
+        expect(act1.payload.category).toBe('Onboarding');
+      }
+
+      expect(act2?.type).toBe('createChannel');
+      if (act2?.type === 'createChannel') {
+        expect(act2.payload.category).toBe('Onboarding');
+      }
+
+      expect(result.validation.valid).toBe(true);
+    });
+
+    test('10f: Safely rejects malformed/invalid Phase 4A output without throwing', async () => {
+      // 1. Missing actions
+      const missingActionsOutput = JSON.stringify({
+        planName: 'Incomplete Plan',
+        explanation: 'No actions array here',
+      });
+      const manager1 = new NLManager(jest.fn().mockResolvedValue(missingActionsOutput));
+      const res1 = await manager1.generatePlan('setup community', authorizedContext);
+      expect(res1.success).toBe(false);
+      expect(res1.validation.valid).toBe(false);
+
+      // 2. Invalid action type
+      const invalidActionOutput = JSON.stringify({
+        actions: [
+          {
+            type: 'nukeEverything',
+            payload: { name: 'test' },
+          },
+        ],
+      });
+      const manager2 = new NLManager(jest.fn().mockResolvedValue(invalidActionOutput));
+      const res2 = await manager2.generatePlan('nuke community', authorizedContext);
+      expect(res2.success).toBe(false);
+      expect(res2.validation.valid).toBe(false);
+
+      // 3. Invalid channel type
+      const invalidChannelTypeOutput = JSON.stringify({
+        actions: [
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'bad-channel',
+              type: 'INVALID_CHANNEL_TYPE',
+            },
+          },
+        ],
+      });
+      const manager3 = new NLManager(jest.fn().mockResolvedValue(invalidChannelTypeOutput));
+      const res3 = await manager3.generatePlan('create invalid channel', authorizedContext);
+      expect(res3.success).toBe(false);
+      expect(res3.validation.valid).toBe(false);
+
+      // 4. Malformed JSON
+      const malformedJsonOutput = '{"actions": [{"type": "createChannel", "payload": { "name": "bad"';
+      const manager4 = new NLManager(jest.fn().mockResolvedValue(malformedJsonOutput));
+      const res4 = await manager4.generatePlan('malformed json instruction', authorizedContext);
+      expect(res4.success).toBe(false);
+      expect(res4.validation.valid).toBe(false);
+    });
+  });
 });
