@@ -40,6 +40,12 @@ export type DeleteRolePayload = {
   roleName: string;
 };
 
+export type TimeoutMemberPayload = {
+  memberId: string;
+  durationMinutes: number;
+  reason: string;
+};
+
 export type DiscordAction =
   | { type: 'createRole'; payload: CreateRolePayload }
   | { type: 'createChannel'; payload: CreateChannelPayload }
@@ -48,7 +54,8 @@ export type DiscordAction =
   | { type: 'applyPermissionTemplate'; payload: ApplyPermissionTemplatePayload }
   | { type: 'deleteChannel'; payload: DeleteChannelPayload }
   | { type: 'deleteCategory'; payload: DeleteCategoryPayload }
-  | { type: 'deleteRole'; payload: DeleteRolePayload };
+  | { type: 'deleteRole'; payload: DeleteRolePayload }
+  | { type: 'timeoutMember'; payload: TimeoutMemberPayload };
 
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' | 'BLOCKED';
 

@@ -1,6 +1,6 @@
 import { Guild, GuildChannel, Role, TextChannel, VoiceChannel, CategoryChannel, ChannelType } from 'discord.js';
 import { findRole, findChannel, findCategory } from './lookup';
-import { validateAction } from './permissionValidator';
+import { validateAction, hasPrivilegedRole } from './permissionValidator';
 import { DiscordAction } from './types';
 
 /**
@@ -116,6 +116,23 @@ export async function runAction(guild: Guild, action: DiscordAction): Promise<st
       if (!role) return `Role "${roleName}" not found or already deleted.`;
       await role.delete();
       return `Deleted role "${roleName}".`;
+    }
+    case 'timeoutMember': {
+      const { memberId, durationMinutes, reason } = action.payload;
+      const member = await guild.members.fetch(memberId);
+      if (!member) throw new Error(`Member "${memberId}" not found.`);
+      if (member.id === guild.ownerId) {
+        throw new Error('Cannot timeout the server owner.');
+      }
+      if (member.user?.bot) {
+        throw new Error('Cannot timeout bot accounts.');
+      }
+      if (hasPrivilegedRole(member)) {
+        throw new Error('Cannot timeout staff members with privileged roles.');
+      }
+      const ms = durationMinutes * 60 * 1000;
+      await member.timeout(ms, reason);
+      return `Timed out member ${member.user?.tag || member.displayName || memberId} for ${durationMinutes} minutes.`;
     }
     default:
       throw new Error('Unknown action type');

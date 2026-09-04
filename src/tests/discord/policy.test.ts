@@ -33,6 +33,7 @@ describe('Phase 3C Human Authorization Model (Policy Layer)', () => {
       expect(authorize(empty, Category.DRY_RUN, ownerContext)).toBe('ALLOW');
       expect(authorize(empty, Category.REPAIR, ownerContext)).toBe('ALLOW');
       expect(authorize(empty, Category.CONFIRM, ownerContext)).toBe('ALLOW');
+      expect(authorize(empty, Category.MODERATE, ownerContext)).toBe('ALLOW');
     });
 
     test('owner with Founder role is allowed (owner takes precedence)', () => {
@@ -42,6 +43,7 @@ describe('Phase 3C Human Authorization Model (Policy Layer)', () => {
       expect(authorize(founder, Category.DRY_RUN, ownerContext)).toBe('ALLOW');
       expect(authorize(founder, Category.REPAIR, ownerContext)).toBe('ALLOW');
       expect(authorize(founder, Category.CONFIRM, ownerContext)).toBe('ALLOW');
+      expect(authorize(founder, Category.MODERATE, ownerContext)).toBe('ALLOW');
     });
 
     test('owner with unrelated role is allowed for all categories', () => {
@@ -51,6 +53,7 @@ describe('Phase 3C Human Authorization Model (Policy Layer)', () => {
       expect(authorize(unknown, Category.DRY_RUN, ownerContext)).toBe('ALLOW');
       expect(authorize(unknown, Category.REPAIR, ownerContext)).toBe('ALLOW');
       expect(authorize(unknown, Category.CONFIRM, ownerContext)).toBe('ALLOW');
+      expect(authorize(unknown, Category.MODERATE, ownerContext)).toBe('ALLOW');
     });
 
     test('non-owner caller does not receive owner authorization', () => {
@@ -76,6 +79,7 @@ describe('Phase 3C Human Authorization Model (Policy Layer)', () => {
     test('Founder is allowed for high-level operations (repair and confirmation)', () => {
       expect(authorize(founder, Category.REPAIR)).toBe('ALLOW');
       expect(authorize(founder, Category.CONFIRM)).toBe('ALLOW');
+      expect(authorize(founder, Category.MODERATE)).toBe('ALLOW');
     });
   });
 
@@ -93,6 +97,7 @@ describe('Phase 3C Human Authorization Model (Policy Layer)', () => {
       expect(authorize(teamKosmo, Category.DRY_RUN)).toBe('ALLOW');
       expect(authorize(teamKosmo, Category.REPAIR)).toBe('ALLOW');
       expect(authorize(teamKosmo, Category.CONFIRM)).toBe('ALLOW');
+      expect(authorize(teamKosmo, Category.MODERATE)).toBe('ALLOW');
     });
   });
 
@@ -108,6 +113,7 @@ describe('Phase 3C Human Authorization Model (Policy Layer)', () => {
       expect(authorize(admin, Category.AUDIT)).toBe('ALLOW');
       expect(authorize(admin, Category.MANAGE)).toBe('ALLOW');
       expect(authorize(admin, Category.DRY_RUN)).toBe('ALLOW');
+      expect(authorize(admin, Category.MODERATE)).toBe('ALLOW');
     });
 
     test('Admin preserves existing high-risk repair approval behavior', () => {
@@ -143,6 +149,10 @@ describe('Phase 3C Human Authorization Model (Policy Layer)', () => {
       expect(authorize(moderator, Category.MANAGE)).toBe('DENY');
       expect(authorize(moderator, Category.DRY_RUN)).toBe('DENY');
     });
+
+    test('Moderator is allowed for member moderation (Phase 4D Category.MODERATE)', () => {
+      expect(authorize(moderator, Category.MODERATE)).toBe('ALLOW');
+    });
   });
 
   // =========================================================================
@@ -160,12 +170,14 @@ describe('Phase 3C Human Authorization Model (Policy Layer)', () => {
       expect(authorize(unknown, Category.DRY_RUN)).toBe('DENY');
       expect(authorize(unknown, Category.REPAIR)).toBe('DENY');
       expect(authorize(unknown, Category.CONFIRM)).toBe('DENY');
+      expect(authorize(unknown, Category.MODERATE)).toBe('DENY');
 
       expect(authorize(empty, Category.AUDIT)).toBe('DENY');
       expect(authorize(empty, Category.MANAGE)).toBe('DENY');
       expect(authorize(empty, Category.DRY_RUN)).toBe('DENY');
       expect(authorize(empty, Category.REPAIR)).toBe('DENY');
       expect(authorize(empty, Category.CONFIRM)).toBe('DENY');
+      expect(authorize(empty, Category.MODERATE)).toBe('DENY');
     });
   });
 

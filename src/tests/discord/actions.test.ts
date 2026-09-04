@@ -341,4 +341,102 @@ describe('Discord Actions Executor (runAction)', () => {
     };
     await expect(runAction(mockGuild, removeAction)).rejects.toThrow(/privileged role/i);
   });
+
+  describe('timeoutMember action', () => {
+    test('successfully times out a member and returns confirmation', async () => {
+      const mockMember = {
+        id: 'member-1',
+        user: { tag: 'TestUser#1234', bot: false },
+        roles: { cache: new Map() },
+        timeout: jest.fn().mockResolvedValue(undefined),
+      };
+      (mockGuild.members.fetch as jest.Mock).mockResolvedValueOnce(mockMember);
+
+      const action: DiscordAction = {
+        type: 'timeoutMember',
+        payload: { memberId: 'member-1', durationMinutes: 10, reason: 'Spam' },
+      };
+
+      const result = await runAction(mockGuild, action);
+      expect(result).toBe('Timed out member TestUser#1234 for 10 minutes.');
+      expect(mockMember.timeout).toHaveBeenCalledWith(10 * 60 * 1000, 'Spam');
+    });
+
+    test('rejects timing out the server owner', async () => {
+      const guildWithOwner = {
+        ...mockGuild,
+        ownerId: 'owner-1',
+        members: {
+          cache: new Map(),
+          fetch: jest.fn().mockResolvedValue({
+            id: 'owner-1',
+            user: { tag: 'Owner#0001', bot: false },
+            roles: { cache: new Map() },
+            timeout: jest.fn(),
+          }),
+        },
+      } as unknown as Guild;
+
+      const action: DiscordAction = {
+        type: 'timeoutMember',
+        payload: { memberId: 'owner-1', durationMinutes: 10, reason: 'Test' },
+      };
+
+      await expect(runAction(guildWithOwner, action)).rejects.toThrow('Cannot timeout the server owner.');
+    });
+
+    test('rejects timing out a bot account', async () => {
+      const mockBotMember = {
+        id: 'bot-1',
+        user: { tag: 'Bot#0001', bot: true },
+        roles: { cache: new Map() },
+        timeout: jest.fn(),
+      };
+      (mockGuild.members.fetch as jest.Mock).mockResolvedValueOnce(mockBotMember);
+
+      const action: DiscordAction = {
+        type: 'timeoutMember',
+        payload: { memberId: 'bot-1', durationMinutes: 10, reason: 'Test' },
+      };
+
+      await expect(runAction(mockGuild, action)).rejects.toThrow('Cannot timeout bot accounts.');
+    });
+
+    test('rejects timing out staff members with privileged roles', async () => {
+      const mockStaffMember = {
+        id: 'staff-1',
+        user: { tag: 'Admin#0001', bot: false },
+        roles: {
+          cache: new Map([['role-admin', { name: 'Administrator' }]]),
+        },
+        timeout: jest.fn(),
+      };
+      (mockGuild.members.fetch as jest.Mock).mockResolvedValueOnce(mockStaffMember);
+
+      const action: DiscordAction = {
+        type: 'timeoutMember',
+        payload: { memberId: 'staff-1', durationMinutes: 10, reason: 'Test' },
+      };
+
+      await expect(runAction(mockGuild, action)).rejects.toThrow('Cannot timeout staff members with privileged roles.');
+    });
+
+    test('rejects invalid duration or empty reason via validator', async () => {
+      const invalidDurationAction: DiscordAction = {
+        type: 'timeoutMember',
+        payload: { memberId: 'user-1', durationMinutes: 0, reason: 'Valid reason' },
+      };
+      await expect(runAction(mockGuild, invalidDurationAction)).rejects.toThrow(
+        /integer between 1 and 10080 minutes/i
+      );
+
+      const emptyReasonAction: DiscordAction = {
+        type: 'timeoutMember',
+        payload: { memberId: 'user-1', durationMinutes: 5, reason: '   ' },
+      };
+      await expect(runAction(mockGuild, emptyReasonAction)).rejects.toThrow(
+        /reason cannot be empty/i
+      );
+    });
+  });
 });

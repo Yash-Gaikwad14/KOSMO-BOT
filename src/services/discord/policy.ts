@@ -24,6 +24,7 @@ export enum Category {
   DRY_RUN = 'DRY_RUN',
   MANAGE = 'MANAGE', // NL‑prompt → plan generation
   CONFIRM = 'CONFIRM', // confirming a plan before execution
+  MODERATE = 'MODERATE', // member moderation workflows (Phase 4D)
 }
 
 /** Decision returned by the policy layer. */
@@ -150,16 +151,16 @@ export function getAuthLevel(
  * Evaluates the authorization matrix for a given authorization level and operation category.
  *
  * Authorization Matrix:
- * ┌────────────┬───────┬────────┬─────────┬───────────────────────────┬───────────────────────────┐
- * │ Level      │ AUDIT │ MANAGE │ DRY_RUN │ REPAIR                    │ CONFIRM                   │
- * ├────────────┼───────┼────────┼─────────┼───────────────────────────┼───────────────────────────┤
- * │ OWNER      │ ALLOW │ ALLOW  │ ALLOW   │ ALLOW                     │ ALLOW                     │
- * │ FOUNDER    │ ALLOW │ ALLOW  │ ALLOW   │ ALLOW                     │ ALLOW                     │
- * │ TEAM_KOSMO │ ALLOW │ ALLOW  │ ALLOW   │ ALLOW                     │ ALLOW                     │
- * │ ADMIN      │ ALLOW │ ALLOW  │ ALLOW   │ REQUIRES_FOUNDERS_APPROVAL│ REQUIRES_FOUNDERS_APPROVAL│
- * │ MODERATOR  │ ALLOW │ DENY   │ DENY    │ DENY                      │ DENY                      │
- * │ NONE       │ DENY  │ DENY   │ DENY    │ DENY                      │ DENY                      │
- * └────────────┴───────┴────────┴─────────┴───────────────────────────┴───────────────────────────┘
+ * ┌────────────┬───────┬────────┬─────────┬──────────┬───────────────────────────┬───────────────────────────┐
+ * │ Level      │ AUDIT │ MANAGE │ DRY_RUN │ MODERATE │ REPAIR                    │ CONFIRM                   │
+ * ├────────────┼───────┼────────┼─────────┼──────────┼───────────────────────────┼───────────────────────────┤
+ * │ OWNER      │ ALLOW │ ALLOW  │ ALLOW   │ ALLOW    │ ALLOW                     │ ALLOW                     │
+ * │ FOUNDER    │ ALLOW │ ALLOW  │ ALLOW   │ ALLOW    │ ALLOW                     │ ALLOW                     │
+ * │ TEAM_KOSMO │ ALLOW │ ALLOW  │ ALLOW   │ ALLOW    │ ALLOW                     │ ALLOW                     │
+ * │ ADMIN      │ ALLOW │ ALLOW  │ ALLOW   │ ALLOW    │ REQUIRES_FOUNDERS_APPROVAL│ REQUIRES_FOUNDERS_APPROVAL│
+ * │ MODERATOR  │ ALLOW │ DENY   │ DENY    │ ALLOW    │ DENY                      │ DENY                      │
+ * │ NONE       │ DENY  │ DENY   │ DENY    │ DENY     │ DENY                      │ DENY                      │
+ * └────────────┴───────┴────────┴─────────┴──────────┴───────────────────────────┴───────────────────────────┘
  *
  * @param level The caller's resolved AuthLevel.
  * @param category The requested operation category.
@@ -179,7 +180,7 @@ export function evaluatePolicy(level: AuthLevel, category: Category): PolicyDeci
       return 'ALLOW';
 
     case AuthLevel.MODERATOR:
-      if (category === Category.AUDIT) {
+      if (category === Category.AUDIT || category === Category.MODERATE) {
         return 'ALLOW';
       }
       return 'DENY';
@@ -227,6 +228,43 @@ export function getLogicalRoles(userRoleIds: string[]): LogicalRole[] {
     }
   });
   return roles;
+}
+
+/**
+ * Extracts an array of string role IDs from a Discord GuildMember, APIGuildMember,
+ * or mock member object.
+ */
+export function extractUserRoleIds(member: any): string[] {
+  const userRoleIds: string[] = [];
+  if (member && 'roles' in member) {
+    const memberRoles = member.roles;
+    if (Array.isArray(memberRoles)) {
+      memberRoles.forEach((r: any) => {
+        if (r && typeof r === 'object') {
+          if (r.id) userRoleIds.push(String(r.id));
+          if (r.name && r.name !== r.id) userRoleIds.push(String(r.name));
+        } else if (r) {
+          userRoleIds.push(String(r));
+        }
+      });
+    } else if (typeof memberRoles === 'object' && 'cache' in memberRoles) {
+      const cache = (memberRoles as any).cache;
+      const extract = (r: any) => {
+        if (r && typeof r === 'object') {
+          if (r.id) userRoleIds.push(String(r.id));
+          if (r.name && r.name !== r.id) userRoleIds.push(String(r.name));
+        } else if (r) {
+          userRoleIds.push(String(r));
+        }
+      };
+      if (typeof cache?.forEach === 'function') {
+        cache.forEach(extract);
+      } else if (typeof cache?.values === 'function') {
+        Array.from(cache.values()).forEach(extract);
+      }
+    }
+  }
+  return userRoleIds;
 }
 
 export const ALLOWED_MANAGEMENT_ROLES = [

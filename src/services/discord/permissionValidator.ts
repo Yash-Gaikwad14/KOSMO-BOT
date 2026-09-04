@@ -1,4 +1,4 @@
-import { Guild } from 'discord.js';
+import { Guild, GuildMember } from 'discord.js';
 import { DiscordAction, ValidationResult } from './types';
 
 /**
@@ -31,6 +31,118 @@ export const FORBIDDEN_PERMISSIONS = [
 ];
 
 /**
+ * Result of a moderation target safety validation check.
+ */
+export interface TargetSafetyCheckResult {
+  safe: boolean;
+  reason?: string;
+}
+
+/**
+ * Helper to determine if a member possesses any privileged roles.
+ */
+export function hasPrivilegedRole(member: any): boolean {
+  if (!member?.roles) return false;
+  const rolesCollection = member.roles.cache || member.roles;
+  if (rolesCollection && typeof rolesCollection.some === 'function') {
+    return rolesCollection.some((role: any) =>
+      PRIVILEGED_ROLE_NAMES.some((priv) => priv.toLowerCase() === role.name?.toLowerCase())
+    );
+  }
+  if (rolesCollection && typeof rolesCollection.values === 'function') {
+    for (const role of rolesCollection.values()) {
+      if (PRIVILEGED_ROLE_NAMES.some((priv) => priv.toLowerCase() === role.name?.toLowerCase())) {
+        return true;
+      }
+    }
+  }
+  if (Array.isArray(rolesCollection)) {
+    return rolesCollection.some((role: any) =>
+      PRIVILEGED_ROLE_NAMES.some((priv) => priv.toLowerCase() === (role.name || role)?.toLowerCase())
+    );
+  }
+  return false;
+}
+
+/**
+ * Helper to extract highest role position from a member.
+ */
+export function getHighestRolePosition(member: any): number {
+  if (!member) return 0;
+  if (member.roles?.highest && typeof member.roles.highest.position === 'number') {
+    return member.roles.highest.position;
+  }
+  const rolesCollection = member.roles?.cache || member.roles;
+  if (rolesCollection && typeof rolesCollection.values === 'function') {
+    let max = 0;
+    for (const r of rolesCollection.values()) {
+      if (typeof r.position === 'number' && r.position > max) {
+        max = r.position;
+      }
+    }
+    return max;
+  }
+  return 0;
+}
+
+/**
+ * Validates target safety and role hierarchy constraints for moderation timeout operations.
+ */
+export function validateTimeoutTargetSafety(
+  guild: Guild,
+  caller: GuildMember,
+  target: GuildMember
+): TargetSafetyCheckResult {
+  // 1. Self-target rejection
+  if (caller.id === target.id) {
+    return { safe: false, reason: 'You cannot moderate yourself.' };
+  }
+
+  // 2. Bot target rejection
+  if (target.user?.bot) {
+    return { safe: false, reason: 'Cannot moderate bot accounts.' };
+  }
+
+  // 3. Server owner target rejection
+  if (target.id === guild.ownerId) {
+    return { safe: false, reason: 'Cannot moderate the server owner.' };
+  }
+
+  // 4. Privileged staff target rejection
+  if (hasPrivilegedRole(target)) {
+    return { safe: false, reason: 'Cannot moderate staff members with privileged roles.' };
+  }
+
+  const targetHighest = getHighestRolePosition(target);
+
+  // 5. Caller role hierarchy check (Unless caller is server owner)
+  const isCallerOwner = caller.id === guild.ownerId;
+  if (!isCallerOwner) {
+    const callerHighest = getHighestRolePosition(caller);
+    if (callerHighest <= targetHighest) {
+      return {
+        safe: false,
+        reason: 'You cannot moderate a member with an equal or higher role than your highest role.',
+      };
+    }
+  }
+
+  // 6. Bot role hierarchy check
+  const botMember = guild.members.me;
+  if (botMember) {
+    const botHighest = getHighestRolePosition(botMember);
+    if (botHighest <= targetHighest) {
+      return {
+        safe: false,
+        reason: 'The bot cannot moderate a member with an equal or higher role than its highest role.',
+      };
+    }
+  }
+
+  return { safe: true };
+}
+
+/**
  * Validate a proposed DiscordAction (Phase 2 legacy signature).
  * Throws an Error if the action would grant a privileged role or permission.
  */
@@ -39,6 +151,22 @@ export function validateAction(guild: Guild, action: DiscordAction): void {
   if (!result.valid || result.blocked) {
     const reason = result.blockedReasons?.[0] || result.errors[0] || 'Action rejected by permission validator.';
     throw new Error(reason);
+  }
+
+  // Guild-specific runtime checks for member actions
+  if (action.type === 'timeoutMember' && guild) {
+    if (action.payload.memberId === guild.ownerId) {
+      throw new Error('Cannot timeout the server owner.');
+    }
+    const member = guild.members.cache?.get?.(action.payload.memberId);
+    if (member) {
+      if (member.user?.bot) {
+        throw new Error('Cannot timeout bot accounts.');
+      }
+      if (hasPrivilegedRole(member)) {
+        throw new Error('Cannot timeout staff members with privileged roles.');
+      }
+    }
   }
 }
 
@@ -152,6 +280,22 @@ export class PermissionValidator {
         const categoryName = action.payload.categoryName?.trim() || '';
         if (!categoryName) {
           errors.push('Category name cannot be empty for deletion.');
+        }
+        break;
+      }
+
+      case 'timeoutMember': {
+        const memberId = action.payload.memberId?.trim() || '';
+        if (!memberId) {
+          errors.push('Member ID cannot be empty for timeout.');
+        }
+        const duration = action.payload.durationMinutes;
+        if (typeof duration !== 'number' || duration < 1 || duration > 10080 || !Number.isInteger(duration)) {
+          errors.push('Timeout duration must be an integer between 1 and 10080 minutes (7 days).');
+        }
+        const reason = action.payload.reason?.trim() || '';
+        if (!reason) {
+          errors.push('Timeout reason cannot be empty.');
         }
         break;
       }
