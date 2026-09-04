@@ -69,6 +69,11 @@ export const data = new SlashCommandBuilder()
             { name: 'introductions', value: 'introductions' }
           )
       )
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName('start')
+      .setDescription('Get started in this community with essential landmarks and channels')
   );
 
 /**
@@ -113,12 +118,13 @@ export function formatItemList(items: string[], maxLength: number = 1000): strin
 }
 
 /**
- * Deterministically finds the best matching navigable channel for a topic.
+ * Deterministically finds the best matching navigable channel for a set of keywords.
  * Returns the matched channel and parent category name if found, or null if no confident destination exists.
  */
-export function findBestCommunityChannel(
+export function findBestChannelByKeywords(
   guild: Guild,
-  topic: GuideTopic
+  keywords: string[],
+  topicOrPreferredName?: string
 ): { channel: GuildBasedChannel; categoryName?: string } | null {
   const channels = guild.channels?.cache
     ? Array.from(guild.channels.cache.values())
@@ -132,14 +138,12 @@ export function findBestCommunityChannel(
         c.type === ChannelType.GuildForum)
   );
 
-  if (eligibleChannels.length === 0) {
+  if (eligibleChannels.length === 0 || !keywords || keywords.length === 0) {
     return null;
   }
 
-  const keywords = TOPIC_KEYWORDS[topic];
-  if (!keywords) {
-    return null;
-  }
+  const normalizedKeywords = keywords.map(normalizeName).filter(Boolean);
+  const normPreferred = topicOrPreferredName ? normalizeName(topicOrPreferredName) : '';
 
   const scoredChannels: {
     channel: GuildBasedChannel;
@@ -171,22 +175,22 @@ export function findBestCommunityChannel(
     let specificity = 0;
 
     // Priority 1: Exact channel name match
-    if (normName === topic) {
+    if (normPreferred && normName === normPreferred) {
       score = 1000;
       specificity = 100;
-    } else if (keywords.includes(normName)) {
+    } else if (normalizedKeywords.includes(normName)) {
       score = 900;
       specificity = 90;
     } else {
       // Priority 2: Strong keyword token match in channel name
-      const matchedTokens = cTokens.filter((token) => keywords.includes(token));
+      const matchedTokens = cTokens.filter((token) => normalizedKeywords.includes(token));
       if (matchedTokens.length > 0) {
         const ratio = matchedTokens.length / cTokens.length;
         score = 500 + Math.round(ratio * 100) + matchedTokens.length * 20;
         specificity = Math.round(ratio * 50) + (10 - Math.min(cTokens.length, 10));
       } else {
         // Fallback keyword substring in channel name (minimum 4 chars)
-        const hasSubstring = keywords.some(
+        const hasSubstring = normalizedKeywords.some(
           (kw) => kw.length >= 4 && normName.includes(kw)
         );
         if (hasSubstring) {
@@ -198,9 +202,9 @@ export function findBestCommunityChannel(
 
     // Priority 3: Parent category name match
     const catMatches =
-      catNormName === topic ||
-      keywords.includes(catNormName) ||
-      catTokens.some((token) => keywords.includes(token));
+      (normPreferred && catNormName === normPreferred) ||
+      normalizedKeywords.includes(catNormName) ||
+      catTokens.some((token) => normalizedKeywords.includes(token));
 
     if (catMatches) {
       if (score > 0) {
@@ -250,6 +254,125 @@ export function findBestCommunityChannel(
   return {
     channel: best.channel,
     categoryName: best.categoryName,
+  };
+}
+
+/**
+ * Deterministically finds the best matching navigable channel for a topic.
+ * Returns the matched channel and parent category name if found, or null if no confident destination exists.
+ */
+export function findBestCommunityChannel(
+  guild: Guild,
+  topic: GuideTopic
+): { channel: GuildBasedChannel; categoryName?: string } | null {
+  const keywords = TOPIC_KEYWORDS[topic];
+  if (!keywords) {
+    return null;
+  }
+  return findBestChannelByKeywords(guild, keywords, topic);
+}
+
+export interface CommunityLandmarks {
+  rules: GuildBasedChannel | null;
+  roles: GuildBasedChannel | null;
+  introductions: GuildBasedChannel | null;
+  general: GuildBasedChannel | null;
+  announcements: GuildBasedChannel | null;
+  support: GuildBasedChannel | null;
+}
+
+/**
+ * Deterministically discovers the 6 foundational community landmark channels for onboarding.
+ * Prefers official Discord properties (rulesChannel, publicUpdatesChannel) when available and navigable,
+ * falling back to keyword-based discovery.
+ */
+export function findCommunityLandmarks(guild: Guild): CommunityLandmarks {
+  function isNavigableText(chan: any): boolean {
+    if (!chan) return false;
+    return (
+      chan.type === ChannelType.GuildText ||
+      chan.type === ChannelType.GuildAnnouncement ||
+      chan.type === ChannelType.GuildForum
+    );
+  }
+
+  // 1. Rules
+  let rulesChannel: GuildBasedChannel | null = null;
+  if (guild.rulesChannel && isNavigableText(guild.rulesChannel)) {
+    rulesChannel = guild.rulesChannel;
+  } else if (guild.rulesChannelId && guild.channels?.cache) {
+    const candidate = guild.channels.cache.get(guild.rulesChannelId);
+    if (candidate && isNavigableText(candidate)) {
+      rulesChannel = candidate;
+    }
+  }
+  if (!rulesChannel) {
+    const match = findBestChannelByKeywords(
+      guild,
+      ['rules', 'start-here', 'start here', 'guidelines', 'welcome', 'rule'],
+      'rules'
+    );
+    if (match) rulesChannel = match.channel;
+  }
+
+  // 2. Announcements
+  let announcementsChannel: GuildBasedChannel | null = null;
+  if (guild.publicUpdatesChannel && isNavigableText(guild.publicUpdatesChannel)) {
+    announcementsChannel = guild.publicUpdatesChannel;
+  } else if (guild.publicUpdatesChannelId && guild.channels?.cache) {
+    const candidate = guild.channels.cache.get(guild.publicUpdatesChannelId);
+    if (candidate && isNavigableText(candidate)) {
+      announcementsChannel = candidate;
+    }
+  }
+  if (!announcementsChannel) {
+    const match = findBestChannelByKeywords(
+      guild,
+      ['announcements', 'announcement', 'news', 'updates', 'update'],
+      'announcements'
+    );
+    if (match) announcementsChannel = match.channel;
+  }
+
+  // 3. Role Selection
+  const rolesMatch = findBestChannelByKeywords(
+    guild,
+    ['get-roles', 'get roles', 'roles', 'role-select', 'role select', 'assign-roles', 'assign roles'],
+    'get-roles'
+  );
+  const rolesChannel = rolesMatch ? rolesMatch.channel : null;
+
+  // 4. General Discussion
+  const generalMatch = findBestChannelByKeywords(
+    guild,
+    ['general-chat', 'general chat', 'general', 'chat', 'community'],
+    'general'
+  );
+  const generalChannel = generalMatch ? generalMatch.channel : null;
+
+  // 5. Support / Help
+  const supportMatch = findBestChannelByKeywords(
+    guild,
+    ['contact-support', 'contact support', 'help-desk', 'help desk', 'support', 'help', 'faq'],
+    'help'
+  );
+  const supportChannel = supportMatch ? supportMatch.channel : null;
+
+  // 6. Introductions
+  const introsMatch = findBestChannelByKeywords(
+    guild,
+    ['introductions', 'introduction', 'introduce', 'welcome', 'say hello'],
+    'introductions'
+  );
+  const introsChannel = introsMatch ? introsMatch.channel : null;
+
+  return {
+    rules: rulesChannel,
+    roles: rolesChannel,
+    introductions: introsChannel,
+    general: generalChannel,
+    announcements: announcementsChannel,
+    support: supportChannel,
   };
 }
 
@@ -459,6 +582,65 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
           .setColor(0x3498db)
           .addFields(fields)
           .setTimestamp();
+
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({ embeds: [embed] });
+        } else {
+          await interaction.reply({ embeds: [embed] });
+        }
+        break;
+      }
+
+      case 'start': {
+        const landmarks = findCommunityLandmarks(guild);
+
+        const embed = new EmbedBuilder()
+          .setTitle(`Getting Started — ${guild.name}`)
+          .setColor(0x3498db)
+          .setDescription(
+            `Welcome to **${guild.name}**! Here is a quick roadmap of essential community channels to help you get started:`
+          )
+          .addFields(
+            {
+              name: '1. Review the Rules',
+              value: landmarks.rules ? `<#${landmarks.rules.id}>` : 'Not configured',
+              inline: true,
+            },
+            {
+              name: '2. Pick Your Roles',
+              value: landmarks.roles ? `<#${landmarks.roles.id}>` : 'Not configured',
+              inline: true,
+            },
+            {
+              name: '3. Say Hello',
+              value: landmarks.introductions ? `<#${landmarks.introductions.id}>` : 'Not configured',
+              inline: true,
+            },
+            {
+              name: '4. Join the Discussion',
+              value: landmarks.general ? `<#${landmarks.general.id}>` : 'Not configured',
+              inline: true,
+            },
+            {
+              name: '5. Stay Informed',
+              value: landmarks.announcements ? `<#${landmarks.announcements.id}>` : 'Not configured',
+              inline: true,
+            },
+            {
+              name: '6. Get Support',
+              value: landmarks.support ? `<#${landmarks.support.id}>` : 'Not configured',
+              inline: true,
+            }
+          )
+          .setFooter({
+            text: 'KOSMO Community Assistance • Deterministic & Read-Only',
+          })
+          .setTimestamp();
+
+        if (typeof guild.iconURL === 'function') {
+          const icon = guild.iconURL();
+          if (icon) embed.setThumbnail(icon);
+        }
 
         if (interaction.replied || interaction.deferred) {
           await interaction.followUp({ embeds: [embed] });

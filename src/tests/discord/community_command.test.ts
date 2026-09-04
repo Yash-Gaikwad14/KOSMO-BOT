@@ -3,6 +3,8 @@ import {
   execute,
   formatItemList,
   findBestCommunityChannel,
+  findBestChannelByKeywords,
+  findCommunityLandmarks,
   normalizeName,
   TOPIC_KEYWORDS,
   GuideTopic,
@@ -18,7 +20,7 @@ import {
 } from 'discord.js';
 import * as path from 'path';
 
-describe('/community command (Phase 4C.1 Basic Community Help & 4C.2 Guidance)', () => {
+describe('/community command (Phase 4C.1, 4C.2 & 4C.3)', () => {
   function createMockGuild(overrides: any = {}): Guild {
     const roles = new Collection<string, Role>([
       [
@@ -172,6 +174,7 @@ describe('/community command (Phase 4C.1 Basic Community Help & 4C.2 Guidance)',
     expect(subcommands).toContain('channels');
     expect(subcommands).toContain('roles');
     expect(subcommands).toContain('guide');
+    expect(subcommands).toContain('start');
 
     // Verify command loader discovers the command module
     const commandsRoot = path.join(__dirname, '../../commands');
@@ -364,7 +367,7 @@ describe('/community command (Phase 4C.1 Basic Community Help & 4C.2 Guidance)',
   test('Test 10: Strictly read-only; no Discord mutation APIs are called across any subcommand', async () => {
     const mockGuild = createMockGuild();
 
-    for (const sub of ['info', 'channels', 'roles', 'guide']) {
+    for (const sub of ['info', 'channels', 'roles', 'guide', 'start']) {
       const interaction = createMockInteraction({
         subcommand: sub,
         topic: 'general',
@@ -785,5 +788,270 @@ describe('/community command (Phase 4C.1 Basic Community Help & 4C.2 Guidance)',
     // Both channels have identical scores and token counts/ratios
     const match = findBestCommunityChannel(guild, 'help');
     expect(match).toBeNull();
+  });
+
+  // =========================================================================
+  // PHASE 4C.3: COMMUNITY GETTING STARTED HUB (/community start) TESTS
+  // =========================================================================
+
+  // -------------------------------------------------------------------------
+  // Phase 4C.3 - 1: Subcommand registration
+  // -------------------------------------------------------------------------
+  test('Phase 4C.3 - 1: /community start subcommand is registered with correct description', () => {
+    const json = data.toJSON();
+    const startSubcommand = (json.options || []).find((opt: any) => opt.name === 'start') as any;
+
+    expect(startSubcommand).toBeDefined();
+    expect(startSubcommand.description).toMatch(/get started in this community/i);
+    expect(startSubcommand.options).toEqual([]); // Zero required arguments
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 4C.3 - 2: Non-guild execution rejected ephemerally
+  // -------------------------------------------------------------------------
+  test('Phase 4C.3 - 2: /community start rejects non-guild execution with ephemeral error', async () => {
+    const interaction = createMockInteraction({
+      subcommand: 'start',
+      guild: null,
+    });
+
+    await execute(interaction as any);
+
+    expect(interaction.reply).toHaveBeenCalledTimes(1);
+    const replyData = interaction.getReplyData();
+    expect(replyData.ephemeral).toBe(true);
+    expect(replyData.content).toBe('Command must be used in a guild.');
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 4C.3 - 3: Preferred Discord properties rulesChannel and publicUpdatesChannel
+  // -------------------------------------------------------------------------
+  test('Phase 4C.3 - 3: Prefers official guild.rulesChannel and guild.publicUpdatesChannel when present', () => {
+    const rulesChan = {
+      id: 'chan-official-rules',
+      name: 'server-rules',
+      type: ChannelType.GuildText,
+    } as GuildChannel;
+
+    const updatesChan = {
+      id: 'chan-official-updates',
+      name: 'announcements-board',
+      type: ChannelType.GuildAnnouncement,
+    } as GuildChannel;
+
+    const channels = new Collection<string, GuildChannel>([
+      ['chan-official-rules', rulesChan],
+      ['chan-official-updates', updatesChan],
+      ['chan-other-rules', { id: 'chan-other-rules', name: 'rules', type: ChannelType.GuildText } as GuildChannel],
+      ['chan-other-announcements', { id: 'chan-other-announcements', name: 'announcements', type: ChannelType.GuildAnnouncement } as GuildChannel],
+    ]);
+
+    const guild = createMockGuild({
+      channels: { cache: channels } as any,
+      rulesChannel: rulesChan,
+      publicUpdatesChannel: updatesChan,
+    });
+
+    const landmarks = findCommunityLandmarks(guild);
+    expect(landmarks.rules?.id).toBe('chan-official-rules');
+    expect(landmarks.announcements?.id).toBe('chan-official-updates');
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 4C.3 - 4: Rules fallback keyword discovery works
+  // -------------------------------------------------------------------------
+  test('Phase 4C.3 - 4: Rules fallback keyword matching discovers rules channel when rulesChannel is not set', () => {
+    const channels = new Collection<string, GuildChannel>([
+      ['chan-start', { id: 'chan-start', name: 'start-here', type: ChannelType.GuildText } as GuildChannel],
+    ]);
+
+    const guild = createMockGuild({
+      channels: { cache: channels } as any,
+      rulesChannel: null,
+    });
+
+    const landmarks = findCommunityLandmarks(guild);
+    expect(landmarks.rules?.id).toBe('chan-start');
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 4C.3 - 5: Announcements fallback keyword discovery works
+  // -------------------------------------------------------------------------
+  test('Phase 4C.3 - 5: Announcements fallback keyword matching discovers updates channel when publicUpdatesChannel is not set', () => {
+    const channels = new Collection<string, GuildChannel>([
+      ['chan-news', { id: 'chan-news', name: 'community-news', type: ChannelType.GuildAnnouncement } as GuildChannel],
+    ]);
+
+    const guild = createMockGuild({
+      channels: { cache: channels } as any,
+      publicUpdatesChannel: null,
+    });
+
+    const landmarks = findCommunityLandmarks(guild);
+    expect(landmarks.announcements?.id).toBe('chan-news');
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 4C.3 - 6: Role-selection landmark discovery works
+  // -------------------------------------------------------------------------
+  test('Phase 4C.3 - 6: Role-selection landmark discovers roles onboarding channel', () => {
+    const channels = new Collection<string, GuildChannel>([
+      ['chan-get-roles', { id: 'chan-get-roles', name: 'get-roles', type: ChannelType.GuildText } as GuildChannel],
+    ]);
+
+    const guild = createMockGuild({ channels: { cache: channels } as any });
+    const landmarks = findCommunityLandmarks(guild);
+    expect(landmarks.roles?.id).toBe('chan-get-roles');
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 4C.3 - 7: General discussion landmark discovery works
+  // -------------------------------------------------------------------------
+  test('Phase 4C.3 - 7: General discussion landmark discovers general chat channel', () => {
+    const channels = new Collection<string, GuildChannel>([
+      ['chan-gen', { id: 'chan-gen', name: 'general-chat', type: ChannelType.GuildText } as GuildChannel],
+    ]);
+
+    const guild = createMockGuild({ channels: { cache: channels } as any });
+    const landmarks = findCommunityLandmarks(guild);
+    expect(landmarks.general?.id).toBe('chan-gen');
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 4C.3 - 8: Support/help landmark discovery works
+  // -------------------------------------------------------------------------
+  test('Phase 4C.3 - 8: Support/help landmark discovers contact-support channel', () => {
+    const channels = new Collection<string, GuildChannel>([
+      ['chan-supp', { id: 'chan-supp', name: 'contact-support', type: ChannelType.GuildText } as GuildChannel],
+    ]);
+
+    const guild = createMockGuild({ channels: { cache: channels } as any });
+    const landmarks = findCommunityLandmarks(guild);
+    expect(landmarks.support?.id).toBe('chan-supp');
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 4C.3 - 9: Introductions landmark discovery works
+  // -------------------------------------------------------------------------
+  test('Phase 4C.3 - 9: Introductions landmark discovers introductions channel', () => {
+    const channels = new Collection<string, GuildChannel>([
+      ['chan-intro', { id: 'chan-intro', name: 'introductions', type: ChannelType.GuildText } as GuildChannel],
+    ]);
+
+    const guild = createMockGuild({ channels: { cache: channels } as any });
+    const landmarks = findCommunityLandmarks(guild);
+    expect(landmarks.introductions?.id).toBe('chan-intro');
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 4C.3 - 10: Missing landmarks output 'Not configured'
+  // -------------------------------------------------------------------------
+  test('Phase 4C.3 - 10: Missing landmarks produce "Not configured" in embed fields', async () => {
+    // Empty guild with zero channels
+    const guild = createMockGuild({
+      channels: { cache: new Collection() } as any,
+      rulesChannel: null,
+      publicUpdatesChannel: null,
+    });
+
+    const interaction = createMockInteraction({
+      subcommand: 'start',
+      guild,
+    });
+
+    await execute(interaction as any);
+
+    expect(interaction.reply).toHaveBeenCalledTimes(1);
+    const replyData = interaction.getReplyData();
+    const embed = replyData.embeds[0].toJSON();
+
+    for (const field of embed.fields) {
+      expect(field.value).toBe('Not configured');
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 4C.3 - 11: Embed output structure
+  // -------------------------------------------------------------------------
+  test('Phase 4C.3 - 11: Embed has correct title, description, 6 landmark fields, footer and timestamp', async () => {
+    const rulesChan = { id: 'c-rules', name: 'rules', type: ChannelType.GuildText } as GuildChannel;
+    const rolesChan = { id: 'c-roles', name: 'get-roles', type: ChannelType.GuildText } as GuildChannel;
+    const introChan = { id: 'c-intro', name: 'introductions', type: ChannelType.GuildText } as GuildChannel;
+    const genChan = { id: 'c-gen', name: 'general', type: ChannelType.GuildText } as GuildChannel;
+    const annChan = { id: 'c-ann', name: 'announcements', type: ChannelType.GuildAnnouncement } as GuildChannel;
+    const suppChan = { id: 'c-supp', name: 'contact-support', type: ChannelType.GuildText } as GuildChannel;
+
+    const channels = new Collection<string, GuildChannel>([
+      ['c-rules', rulesChan],
+      ['c-roles', rolesChan],
+      ['c-intro', introChan],
+      ['c-gen', genChan],
+      ['c-ann', annChan],
+      ['c-supp', suppChan],
+    ]);
+
+    const guild = createMockGuild({
+      name: 'Kosmo Community',
+      channels: { cache: channels } as any,
+    });
+
+    const interaction = createMockInteraction({
+      subcommand: 'start',
+      guild,
+    });
+
+    await execute(interaction as any);
+
+    const replyData = interaction.getReplyData();
+    const embed = replyData.embeds[0].toJSON();
+
+    expect(embed.title).toBe('Getting Started — Kosmo Community');
+    expect(embed.description).toContain('roadmap of essential community channels');
+    expect(embed.footer?.text).toBe('KOSMO Community Assistance • Deterministic & Read-Only');
+    expect(embed.timestamp).toBeDefined();
+
+    const fieldMap = new Map((embed.fields || []).map((f: any) => [f.name, f.value]));
+    expect(fieldMap.get('1. Review the Rules')).toBe('<#c-rules>');
+    expect(fieldMap.get('2. Pick Your Roles')).toBe('<#c-roles>');
+    expect(fieldMap.get('3. Say Hello')).toBe('<#c-intro>');
+    expect(fieldMap.get('4. Join the Discussion')).toBe('<#c-gen>');
+    expect(fieldMap.get('5. Stay Informed')).toBe('<#c-ann>');
+    expect(fieldMap.get('6. Get Support')).toBe('<#c-supp>');
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 4C.3 - 12: Category and Voice/Stage channels are never selected
+  // -------------------------------------------------------------------------
+  test('Phase 4C.3 - 12: Category, Voice, and Stage channels are never selected as roadmap landmarks', () => {
+    const channels = new Collection<string, GuildChannel>([
+      ['cat-rules', { id: 'cat-rules', name: 'rules', type: ChannelType.GuildCategory } as GuildChannel],
+      ['voice-general', { id: 'voice-general', name: 'general', type: ChannelType.GuildVoice } as GuildChannel],
+      ['voice-roles', { id: 'voice-roles', name: 'get-roles', type: ChannelType.GuildStageVoice } as GuildChannel],
+    ]);
+
+    const guild = createMockGuild({
+      channels: { cache: channels } as any,
+      rulesChannel: null,
+      publicUpdatesChannel: null,
+    });
+
+    const landmarks = findCommunityLandmarks(guild);
+    expect(landmarks.rules).toBeNull();
+    expect(landmarks.general).toBeNull();
+    expect(landmarks.roles).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 4C.3 - 13: Ambiguous equal candidates do not cause arbitrary selection
+  // -------------------------------------------------------------------------
+  test('Phase 4C.3 - 13: Ambiguous equal candidates safely return null (Not configured)', () => {
+    const channels = new Collection<string, GuildChannel>([
+      ['c-supp-1', { id: 'c-supp-1', name: 'help-room-one', type: ChannelType.GuildText } as GuildChannel],
+      ['c-supp-2', { id: 'c-supp-2', name: 'help-room-two', type: ChannelType.GuildText } as GuildChannel],
+    ]);
+
+    const guild = createMockGuild({ channels: { cache: channels } as any });
+    const landmarks = findCommunityLandmarks(guild);
+    expect(landmarks.support).toBeNull();
   });
 });
