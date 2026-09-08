@@ -1,10 +1,19 @@
-﻿// Literal first import - loads .env before anything else runs.
+// Literal first import - loads .env before anything else runs.
 require("dotenv/config");
 
-import { Client, GatewayIntentBits } from "discord.js";
+import { Client } from "discord.js";
+import { getDiscordClientOptions } from "./config/discord";
 import * as path from "path";
 import { loadCommands } from "./commands/loader";
 import { registerCommands } from "./commands/register";
+import { handleConfirmationButton } from "./commands/kosmo/manage";
+import { handleModerationButton } from "./commands/moderation/mod";
+import { handleRewardButton } from "./commands/economy/reward";
+import { handleProposalButton } from "./commands/community/community";
+import { db } from "./services/database";
+import { cache } from "./services/cache";
+import { handleMessageCreate } from "./events/message/messageCreate";
+import { getIntroductionRepository } from "./services/engagement/introductionRepository";
 
 async function main(): Promise<void> {
   const token = process.env.DISCORD_BOT_TOKEN;
@@ -24,16 +33,51 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Database startup check & migrations (if DATABASE_URL configured)
+  if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0) {
+    try {
+      console.log("Connecting to PostgreSQL and verifying health...");
+      await db.connect();
+      await db.migrate();
+      const introRepo = getIntroductionRepository();
+      if ('ensureTable' in introRepo && typeof (introRepo as any).ensureTable === 'function') {
+        await (introRepo as any).ensureTable();
+      }
+      console.log("✅ Database initialized and migrations verified.");
+    } catch (dbErr) {
+      console.error("❌ Critical Database initialization error:", dbErr);
+      if (process.env.NODE_ENV === "production") {
+        process.exit(1);
+      }
+    }
+  } else {
+    console.log("ℹ️ DATABASE_URL not set; running with in-memory repository fallbacks.");
+  }
+
   // Single directory scan for the entire process lifetime.
   const commands = await loadCommands(path.resolve(__dirname, "./commands"));
 
-  const client = new Client({
-    intents: [
-      GatewayIntentBits.Guilds,
-      GatewayIntentBits.GuildMembers,
-      GatewayIntentBits.GuildMessages,
-    ],
-  });
+  const client = new Client(getDiscordClientOptions());
+
+  // Graceful shutdown handlers
+  const shutdown = async (signal: string) => {
+    console.log(`\nReceived ${signal}. Starting graceful shutdown...`);
+    try {
+      client.destroy();
+      console.log("Discord client destroyed.");
+      await db.disconnect();
+      console.log("Database connections closed.");
+      await cache.disconnect();
+      console.log("Redis cache connections closed.");
+    } catch (err) {
+      console.error("Error during graceful shutdown:", err);
+    } finally {
+      process.exit(0);
+    }
+  };
+
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 
   client.once("ready", async () => {
     console.log(`Logged in as ${client.user?.tag}`);
@@ -47,6 +91,25 @@ async function main(): Promise<void> {
   });
 
   client.on("interactionCreate", async (interaction) => {
+    if (interaction.isButton()) {
+      try {
+        if (!interaction.replied && !interaction.deferred) {
+          if (interaction.customId.startsWith("mod_")) {
+            await handleModerationButton(interaction);
+          } else if (interaction.customId.startsWith("reward_")) {
+            await handleRewardButton(interaction);
+          } else if (interaction.customId.startsWith("community_")) {
+            await handleProposalButton(interaction);
+          } else {
+            await handleConfirmationButton(interaction);
+          }
+        }
+      } catch (err) {
+        console.error("Error handling button interaction:", err);
+      }
+      return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
     const entry = commands.get(interaction.commandName);
@@ -66,6 +129,14 @@ async function main(): Promise<void> {
         content: "An error occurred while executing the command.",
         ephemeral: true,
       });
+    }
+  });
+
+  client.on("messageCreate", async (message) => {
+    try {
+      await handleMessageCreate(message, client);
+    } catch (err) {
+      console.error("Error handling messageCreate event:", err);
     }
   });
 

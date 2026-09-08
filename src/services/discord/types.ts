@@ -7,6 +7,7 @@ export type CreateRolePayload = {
 export type CreateChannelPayload = {
   name: string;
   type: 'GUILD_TEXT' | 'GUILD_VOICE' | 'GUILD_CATEGORY';
+  category?: string;
 };
 
 export type AssignRolePayload = {
@@ -27,16 +28,71 @@ export type ApplyPermissionTemplatePayload = {
   permissionOverwrites: PermissionOverwrite[];
 };
 
+export type DeleteChannelPayload = {
+  channelName: string;
+};
+
+export type DeleteCategoryPayload = {
+  categoryName: string;
+};
+
+export type DeleteRolePayload = {
+  roleName: string;
+};
+
+export type TimeoutMemberPayload = {
+  memberId: string;
+  durationMinutes: number;
+  reason: string;
+};
+
+export type KickMemberPayload = {
+  guildId: string;
+  targetId: string;
+  reason: string;
+};
+
+export type BanMemberPayload = {
+  guildId: string;
+  targetId: string;
+  reason: string;
+};
+
+export type PurgeMessagesPayload = {
+  guildId: string;
+  channelId: string;
+  amount: number;
+  reason: string;
+};
+
 export type DiscordAction =
   | { type: 'createRole'; payload: CreateRolePayload }
   | { type: 'createChannel'; payload: CreateChannelPayload }
   | { type: 'assignRole'; payload: AssignRolePayload }
   | { type: 'removeRole'; payload: RemoveRolePayload }
-  | { type: 'applyPermissionTemplate'; payload: ApplyPermissionTemplatePayload };
+  | { type: 'applyPermissionTemplate'; payload: ApplyPermissionTemplatePayload }
+  | { type: 'deleteChannel'; payload: DeleteChannelPayload }
+  | { type: 'deleteCategory'; payload: DeleteCategoryPayload }
+  | { type: 'deleteRole'; payload: DeleteRolePayload }
+  | { type: 'timeoutMember'; payload: TimeoutMemberPayload }
+  | { type: 'kickMember'; payload: KickMemberPayload }
+  | { type: 'banMember'; payload: BanMemberPayload }
+  | { type: 'purgeMessages'; payload: PurgeMessagesPayload };
 
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' | 'BLOCKED';
 
-export type PlanStatus = 'PROPOSED' | 'CONFIRMED' | 'EXECUTED' | 'REJECTED' | 'CANCELLED';
+export type PlanStatus =
+  | 'PROPOSED'
+  | 'PENDING'
+  | 'CONFIRMED'
+  | 'EXECUTING'
+  | 'EXECUTED'
+  | 'VERIFIED'
+  | 'PARTIALLY_FAILED'
+  | 'FAILED'
+  | 'EXPIRED'
+  | 'REJECTED'
+  | 'CANCELLED';
 
 export interface Plan {
   id: string;
@@ -48,6 +104,10 @@ export interface Plan {
   status: PlanStatus;
   createdAt: Date;
   createdBy?: string;
+  guildId?: string;
+  expiresAt?: Date;
+  executionResults?: string[];
+  failedActionIndex?: number;
 }
 
 export interface ValidationResult {
@@ -63,6 +123,7 @@ export interface NLContext {
   username: string;
   roles: string[];
   guildId?: string;
+  guildOwnerId?: string;
   channelId?: string;
   isFounder?: boolean;
 }

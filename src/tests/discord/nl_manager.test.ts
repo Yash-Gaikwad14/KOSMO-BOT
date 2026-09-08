@@ -1,4 +1,4 @@
-import { NLManager, LLMCompletionFn } from '../../services/discord/nl_manager';
+import { NLManager, LLMCompletionFn, NL_SYSTEM_PROMPT } from '../../services/discord/nl_manager';
 import { NLContext, DiscordAction } from '../../services/discord/types';
 import { PermissionValidator } from '../../services/discord/permissionValidator';
 
@@ -174,6 +174,121 @@ describe('Phase 3 Natural Language Management (NLManager)', () => {
     expect(mockLLM).not.toHaveBeenCalled();
   });
 
+  test('TEST 4b: Founder with configured role ID can invoke /kosmo manage', async () => {
+    const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(JSON.stringify({
+      planName: 'Founder Plan',
+      explanation: 'Founder explanation',
+      actions: [{ type: 'createRole', payload: { name: 'NewRole' } }],
+    }));
+    const manager = new NLManager(mockLLM);
+
+    const founderContext: NLContext = {
+      userId: 'founder-user',
+      username: 'FounderUser',
+      roles: ['111111111111111111'],
+      guildId: 'guild-123',
+    };
+
+    const result = await manager.generatePlan('create role NewRole', founderContext);
+    expect(result.success).toBe(true);
+    expect(mockLLM).toHaveBeenCalledTimes(1);
+  });
+
+  test('TEST 4c: Team Kosmo with configured role ID can invoke /kosmo manage', async () => {
+    const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(JSON.stringify({
+      planName: 'Team Plan',
+      explanation: 'Team explanation',
+      actions: [{ type: 'createRole', payload: { name: 'TeamRole' } }],
+    }));
+    const manager = new NLManager(mockLLM);
+
+    const teamContext: NLContext = {
+      userId: 'team-user',
+      username: 'TeamUser',
+      roles: ['222222222222222222'],
+      guildId: 'guild-123',
+    };
+
+    const result = await manager.generatePlan('create role TeamRole', teamContext);
+    expect(result.success).toBe(true);
+    expect(mockLLM).toHaveBeenCalledTimes(1);
+  });
+
+  test('TEST 4d: Server Owner can invoke /kosmo manage even without configured roles', async () => {
+    const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(JSON.stringify({
+      planName: 'Owner Plan',
+      explanation: 'Owner explanation',
+      actions: [{ type: 'createRole', payload: { name: 'OwnerRole' } }],
+    }));
+    const manager = new NLManager(mockLLM);
+
+    const ownerContext: NLContext = {
+      userId: 'guild-owner-id',
+      username: 'GuildOwner',
+      roles: [],
+      guildId: 'guild-123',
+      guildOwnerId: 'guild-owner-id',
+    };
+
+    const result = await manager.generatePlan('create role OwnerRole', ownerContext);
+    expect(result.success).toBe(true);
+    expect(mockLLM).toHaveBeenCalledTimes(1);
+  });
+
+  test('TEST 4e: Admin can invoke /kosmo manage according to policy', async () => {
+    const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(JSON.stringify({
+      planName: 'Admin Plan',
+      explanation: 'Admin explanation',
+      actions: [{ type: 'createRole', payload: { name: 'AdminRole' } }],
+    }));
+    const manager = new NLManager(mockLLM);
+
+    const adminContext: NLContext = {
+      userId: 'admin-user',
+      username: 'AdminUser',
+      roles: ['333333333333333333'],
+      guildId: 'guild-123',
+    };
+
+    const result = await manager.generatePlan('create role AdminRole', adminContext);
+    expect(result.success).toBe(true);
+    expect(mockLLM).toHaveBeenCalledTimes(1);
+  });
+
+  test('TEST 4f: Moderator is rejected from /kosmo manage', async () => {
+    const mockLLM: LLMCompletionFn = jest.fn();
+    const manager = new NLManager(mockLLM);
+
+    const modContext: NLContext = {
+      userId: 'mod-user',
+      username: 'ModUser',
+      roles: ['444444444444444444'],
+      guildId: 'guild-123',
+    };
+
+    const result = await manager.generatePlan('create role ModRole', modContext);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Permission denied');
+    expect(mockLLM).not.toHaveBeenCalled();
+  });
+
+  test('TEST 4g: Unrecognized user is rejected from /kosmo manage', async () => {
+    const mockLLM: LLMCompletionFn = jest.fn();
+    const manager = new NLManager(mockLLM);
+
+    const unknownContext: NLContext = {
+      userId: 'unknown-user',
+      username: 'UnknownUser',
+      roles: ['999999999999999999'],
+      guildId: 'guild-123',
+    };
+
+    const result = await manager.generatePlan('create role SomeRole', unknownContext);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Permission denied');
+    expect(mockLLM).not.toHaveBeenCalled();
+  });
+
   // -------------------------------------------------------------------------
   // TEST 5 — Safety constraints & PermissionValidator adherence
   // -------------------------------------------------------------------------
@@ -222,5 +337,1553 @@ describe('Phase 3 Natural Language Management (NLManager)', () => {
     expect(valResult.valid).toBe(false);
     expect(valResult.blocked).toBe(true);
     expect(valResult.blockedReasons?.[0]).toContain('ManageGuild');
+  });
+
+  // -------------------------------------------------------------------------
+  // TEST 6 — OpenRouter Provider Integration (defaultLLMCaller)
+  // -------------------------------------------------------------------------
+  describe('TEST 6: OpenRouter Provider Integration (defaultLLMCaller)', () => {
+    const originalFetch = global.fetch;
+    const originalEnv = { ...process.env };
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+      process.env = { ...originalEnv };
+      jest.restoreAllMocks();
+    });
+
+    test('6a: Fails safely when OPENROUTER_API_KEY is missing without exposing keys', async () => {
+      delete process.env.OPENROUTER_API_KEY;
+      const manager = new NLManager();
+
+      await expect(
+        manager.defaultLLMCaller({
+          messages: [{ role: 'user', content: 'test prompt' }],
+        })
+      ).rejects.toThrow('OPENROUTER_API_KEY environment variable is not set.');
+    });
+
+    test('6b: Sends request to OpenRouter endpoint with correct headers, model, and body', async () => {
+      process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+      process.env.OPENROUTER_MODEL = 'meta-llama/llama-3.3-70b-instruct';
+
+      const mockResponseData = {
+        choices: [
+          {
+            message: {
+              content: '{"planName": "OpenRouter Test Plan", "explanation": "Generated via OpenRouter", "actions": []}',
+            },
+          },
+        ],
+      };
+
+      const mockFetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: jest.fn().mockResolvedValue(mockResponseData),
+      });
+      global.fetch = mockFetch as any;
+
+      const manager = new NLManager();
+      const rawOutput = await manager.defaultLLMCaller({
+        messages: [
+          { role: 'system', content: 'System instruction' },
+          { role: 'user', content: 'User prompt' },
+        ],
+        temperature: 0.2,
+        max_tokens: 1024,
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const [url, requestInit] = mockFetch.mock.calls[0];
+
+      // 1. Endpoint
+      expect(url).toBe('https://openrouter.ai/api/v1/chat/completions');
+
+      // 2. Headers
+      expect(requestInit.method).toBe('POST');
+      expect(requestInit.headers['Authorization']).toBe('Bearer test-openrouter-key');
+      expect(requestInit.headers['Content-Type']).toBe('application/json');
+      expect(requestInit.headers['HTTP-Referer']).toBe('https://github.com/Yash-Gaikwad14/KOSMO-BOT');
+      expect(requestInit.headers['X-Title']).toBe('Kosmo Discord Bot');
+
+      // 3. Body structure
+      const parsedBody = JSON.parse(requestInit.body);
+      expect(parsedBody.model).toBe('meta-llama/llama-3.3-70b-instruct');
+      expect(parsedBody.messages).toEqual([
+        { role: 'system', content: 'System instruction' },
+        { role: 'user', content: 'User prompt' },
+      ]);
+      expect(parsedBody.temperature).toBe(0.2);
+      expect(parsedBody.max_tokens).toBe(1024);
+
+      // 4. Response parsing
+      expect(rawOutput).toBe('{"planName": "OpenRouter Test Plan", "explanation": "Generated via OpenRouter", "actions": []}');
+    });
+
+    test('6c: Handles API error without leaking the API key in the error message', async () => {
+      process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+      process.env.OPENROUTER_MODEL = 'meta-llama/llama-3.3-70b-instruct';
+
+      const mockFetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        text: jest.fn().mockResolvedValue('{"error":{"message":"Invalid API key provided"}}'),
+      });
+      global.fetch = mockFetch as any;
+
+      const manager = new NLManager();
+      let errorThrown: any;
+      try {
+        await manager.defaultLLMCaller({
+          messages: [{ role: 'user', content: 'hello' }],
+        });
+      } catch (err: any) {
+        errorThrown = err;
+      }
+
+      expect(errorThrown).toBeDefined();
+      expect(errorThrown.message).toContain('OpenRouter API request failed [401 Unauthorized]');
+      expect(errorThrown.message).not.toContain('test-openrouter-key');
+    });
+
+    test('6d: End-to-end generatePlan via defaultLLMCaller with OpenRouter produces valid Plan', async () => {
+      process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+      process.env.OPENROUTER_MODEL = 'meta-llama/llama-3.3-70b-instruct';
+
+      const mockResponseData = {
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                planName: 'OpenRouter Role Plan',
+                explanation: 'Created role via OpenRouter',
+                actions: [{ type: 'createRole', payload: { name: 'CommunityGuest' } }],
+              }),
+            },
+          },
+        ],
+      };
+
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: jest.fn().mockResolvedValue(mockResponseData),
+      }) as any;
+
+      // Default constructor uses defaultLLMCaller
+      const manager = new NLManager();
+      const result = await manager.generatePlan('create role CommunityGuest', authorizedContext);
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.name).toBe('OpenRouter Role Plan');
+      expect(result.plan?.actions[0].type).toBe('createRole');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // TEST 7 — Robust AI JSON Extraction & Prose Handling (Phase 3D.1)
+  // -------------------------------------------------------------------------
+  describe('TEST 7: Robust AI JSON Extraction & Prose Handling', () => {
+    test('7a: Pure JSON string parses directly', () => {
+      const manager = new NLManager();
+      const pureJson = JSON.stringify({
+        actions: [{ type: 'createRole', payload: { name: 'PureRole' } }],
+      });
+      const parsed = manager.extractAndParseJSON(pureJson);
+      expect(parsed.actions).toHaveLength(1);
+      expect(parsed.actions[0].payload.name).toBe('PureRole');
+    });
+
+    test('7b: Fenced JSON with conversational prose before and after parses correctly', () => {
+      const manager = new NLManager();
+      const input = `Sure thing! Here's a test plan for your server:
+\`\`\`json
+{
+  "planName": "Fenced Plan",
+  "actions": [
+    {
+      "type": "createRole",
+      "payload": { "name": "VIP" }
+    }
+  ]
+}
+\`\`\`
+Let me know if you want any adjustments!`;
+
+      const parsed = manager.extractAndParseJSON(input);
+      expect(parsed.planName).toBe('Fenced Plan');
+      expect(parsed.actions).toHaveLength(1);
+      expect(parsed.actions[0].payload.name).toBe('VIP');
+    });
+
+    test('7c: Unfenced JSON surrounded by conversational prose parses correctly (Exact Phase 3D Failure Case)', () => {
+      const manager = new NLManager();
+      const input = `Here's a test plan:
+
+{
+  "actions": [
+    {
+      "type": "createChannel",
+      "payload": {
+        "channelName": "test-channel"
+      }
+    }
+  ]
+}
+
+Hope this helps!`;
+
+      const parsed = manager.extractAndParseJSON(input);
+      expect(parsed.actions).toHaveLength(1);
+      expect(parsed.actions[0].payload.channelName).toBe('test-channel');
+    });
+
+    test('7d: Bare array of actions is wrapped into { actions: [...] }', () => {
+      const manager = new NLManager();
+      const input = `Here are the actions:
+[
+  {
+    "type": "createRole",
+    "payload": { "name": "BareArrayRole" }
+  }
+]`;
+
+      const parsed = manager.extractAndParseJSON(input);
+      expect(parsed.actions).toBeDefined();
+      expect(Array.isArray(parsed.actions)).toBe(true);
+      expect(parsed.actions[0].payload.name).toBe('BareArrayRole');
+    });
+
+    test('7e: JSON with trailing commas is safely parsed', () => {
+      const manager = new NLManager();
+      const input = `
+{
+  "planName": "Trailing Comma Plan",
+  "actions": [
+    {
+      "type": "createRole",
+      "payload": { "name": "CommaRole", },
+    },
+  ],
+}`;
+
+      const parsed = manager.extractAndParseJSON(input);
+      expect(parsed.planName).toBe('Trailing Comma Plan');
+      expect(parsed.actions).toHaveLength(1);
+      expect(parsed.actions[0].payload.name).toBe('CommaRole');
+    });
+
+    test('7f: End-to-end generatePlan normalizes channelName to name and default GUILD_TEXT type', async () => {
+      const conversationalOutput = `Here's a test plan:
+
+{
+  "actions": [
+    {
+      "type": "createChannel",
+      "payload": {
+        "channelName": "test-channel"
+      }
+    }
+  ]
+}
+
+Let me know if this looks good!`;
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(conversationalOutput);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan('create a test channel', authorizedContext);
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      const action = result.plan?.actions[0];
+      expect(action?.type).toBe('createChannel');
+      if (action?.type === 'createChannel') {
+        expect(action.payload.name).toBe('test-channel');
+        expect(action.payload.type).toBe('GUILD_TEXT');
+      }
+    });
+
+    test('7g: Completely non-JSON response fails safely with descriptive error', () => {
+      const manager = new NLManager();
+      const nonJson = 'I am sorry, I cannot fulfill this request because I am just an AI.';
+
+      expect(() => manager.extractAndParseJSON(nonJson)).toThrow();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // TEST 8 — Nemotron JSON Output Reliability & Anti-Pattern Rejection (Phase 3D)
+  // -------------------------------------------------------------------------
+  describe('TEST 8: Nemotron JSON Output Reliability & Contract Enforcement', () => {
+    test('8a: System prompt contains explicit JSON-only and anti-placeholder directives', () => {
+      expect(NL_SYSTEM_PROMPT).toContain('ONLY one valid JSON object');
+      expect(NL_SYSTEM_PROMPT).toContain('No Markdown code fences');
+      expect(NL_SYSTEM_PROMPT).toContain('No explanation');
+      expect(NL_SYSTEM_PROMPT).toContain('No introductory text');
+      expect(NL_SYSTEM_PROMPT).toContain('No concluding text');
+      expect(NL_SYSTEM_PROMPT).toContain('Do not output TypeScript');
+      expect(NL_SYSTEM_PROMPT).toContain('Do not output JSON Schema');
+      expect(NL_SYSTEM_PROMPT).toContain('Do not output type declarations');
+      expect(NL_SYSTEM_PROMPT).toContain('Every property value must be an actual JSON value');
+      expect(NL_SYSTEM_PROMPT).toContain('parseable directly by JSON.parse()');
+      expect(NL_SYSTEM_PROMPT).toContain('Do not invent unsupported action types');
+      expect(NL_SYSTEM_PROMPT).toContain('Follow the existing action schema');
+      expect(NL_SYSTEM_PROMPT).toContain('Notice that `string` above is a TypeScript/schema placeholder and MUST NEVER be emitted');
+      expect(NL_SYSTEM_PROMPT).toContain('Do not use `...` because ellipsis is not valid JSON');
+    });
+
+    test('8b: TEST A — Valid JSON parses cleanly and creates valid proposed plan', async () => {
+      const validJson = JSON.stringify({
+        actions: [
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'test-channel',
+              type: 'GUILD_TEXT',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(validJson);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan('create a channel named test-channel', authorizedContext);
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.actions).toHaveLength(1);
+      expect(result.plan?.actions[0].type).toBe('createChannel');
+      if (result.plan?.actions[0].type === 'createChannel') {
+        expect(result.plan.actions[0].payload.name).toBe('test-channel');
+        expect(result.plan.actions[0].payload.type).toBe('GUILD_TEXT');
+      }
+    });
+
+    test('8c: TEST B — Prose + JSON handled successfully by existing extractor', async () => {
+      const manager = new NLManager();
+      const conversationalEmpty = `Here is the plan:
+
+{
+  "actions": []
+}`;
+
+      // 1. Existing extractor handles prose + JSON successfully
+      const parsed = manager.extractAndParseJSON(conversationalEmpty);
+      expect(parsed.actions).toBeDefined();
+      expect(parsed.actions).toHaveLength(0);
+
+      // 2. End-to-end generatePlan with prose + valid actions
+      const conversationalWithActions = `Here is the plan:
+
+{
+  "actions": [
+    {
+      "type": "createChannel",
+      "payload": {
+        "name": "prose-channel",
+        "type": "GUILD_TEXT"
+      }
+    }
+  ]
+}
+
+Hope this helps!`;
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(conversationalWithActions);
+      const managerWithLLM = new NLManager(mockLLM);
+
+      const result = await managerWithLLM.generatePlan('create prose-channel', authorizedContext);
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.actions).toHaveLength(1);
+      expect(result.plan?.actions[0].type).toBe('createChannel');
+    });
+
+    test('8d: TEST C — TypeScript-style invalid output ({ name: string }) is rejected safely', async () => {
+      const typeScriptInvalid = `{
+  "actions": [
+    {
+      "type": "createChannel",
+      "payload": {
+        "name": string
+      }
+    }
+  ]
+}`;
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(typeScriptInvalid);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan('create a channel', authorizedContext);
+
+      // Must fail safely without converting string placeholder into a valid channel name
+      expect(result.success).toBe(false);
+      expect(result.plan).toBeUndefined();
+      expect(result.error).toMatch(/Failed to parse AI JSON response/i);
+    });
+
+    test('8e: TEST D — JSON Schema style output is rejected as invalid action structure', async () => {
+      const jsonSchemaOutput = JSON.stringify({
+        name: {
+          type: 'string',
+        },
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(jsonSchemaOutput);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan('define name field', authorizedContext);
+
+      // Even though syntax is valid JSON, missing actions array must cause safe rejection
+      expect(result.success).toBe(false);
+      expect(result.plan).toBeUndefined();
+      expect(result.error).toMatch(/actions array missing/i);
+    });
+
+    test('8f: TEST E — Normal Discord instruction end-to-end plan generation', async () => {
+      const mockNemotronResponse = `{
+  "planName": "Create test-channel Channel",
+  "explanation": "Create a new text channel named test-channel for guild members.",
+  "actions": [
+    {
+      "type": "createChannel",
+      "payload": {
+        "name": "test-channel",
+        "type": "GUILD_TEXT"
+      }
+    }
+  ]
+}`;
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockNemotronResponse);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan('Create a channel called test-channel.', authorizedContext);
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.name).toBe('Create test-channel Channel');
+      expect(result.plan?.status).toBe('PROPOSED');
+      expect(result.plan?.actions).toHaveLength(1);
+      const action = result.plan?.actions[0];
+      expect(action?.type).toBe('createChannel');
+      if (action?.type === 'createChannel') {
+        expect(action.payload.name).toBe('test-channel');
+        expect(action.payload.type).toBe('GUILD_TEXT');
+      }
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // TEST 9 — Category Parenting in NL Plan Generation (Phase 3D)
+  // -------------------------------------------------------------------------
+  describe('TEST 9: Category Parenting in NL Plan Generation', () => {
+    test('9a: TEST E — AI plan category extraction preserves category requirement', async () => {
+      const mockResponse = `{
+  "planName": "Create test2 channel in KOSMO Testing category",
+  "explanation": "Create text channel test2 inside KOSMO Testing category.",
+  "actions": [
+    {
+      "type": "createChannel",
+      "payload": {
+        "name": "test2",
+        "type": "GUILD_TEXT",
+        "category": "KOSMO Testing"
+      }
+    }
+  ]
+}`;
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockResponse);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan('create test2 inside KOSMO Testing', authorizedContext);
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.actions).toHaveLength(1);
+      const action = result.plan?.actions[0];
+      expect(action?.type).toBe('createChannel');
+      if (action?.type === 'createChannel') {
+        expect(action.payload.name).toBe('test2');
+        expect(action.payload.type).toBe('GUILD_TEXT');
+        expect(action.payload.category).toBe('KOSMO Testing');
+      }
+    });
+
+    test('9b: TEST F — Normalizes parent and categoryName into category', async () => {
+      // Test "parent" variation
+      const parentResponse = JSON.stringify({
+        actions: [
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'chan-a',
+              type: 'GUILD_TEXT',
+              parent: 'KOSMO Testing',
+            },
+          },
+        ],
+      });
+
+      const manager1 = new NLManager(jest.fn().mockResolvedValue(parentResponse));
+      const res1 = await manager1.generatePlan('create chan-a inside KOSMO Testing', authorizedContext);
+      expect(res1.success).toBe(true);
+      const act1 = res1.plan?.actions[0];
+      if (act1?.type === 'createChannel') {
+        expect(act1.payload.category).toBe('KOSMO Testing');
+      }
+
+      // Test "categoryName" variation
+      const categoryNameResponse = JSON.stringify({
+        actions: [
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'chan-b',
+              type: 'GUILD_TEXT',
+              categoryName: 'KOSMO Testing',
+            },
+          },
+        ],
+      });
+
+      const manager2 = new NLManager(jest.fn().mockResolvedValue(categoryNameResponse));
+      const res2 = await manager2.generatePlan('create chan-b inside KOSMO Testing', authorizedContext);
+      expect(res2.success).toBe(true);
+      const act2 = res2.plan?.actions[0];
+      if (act2?.type === 'createChannel') {
+        expect(act2.payload.category).toBe('KOSMO Testing');
+      }
+    });
+
+    test('9c: TEST G — Category support preserves all safety rules and PermissionValidator constraints', async () => {
+      // Attempting to create privileged role alongside channel inside category must still be blocked
+      const unsafePlan = JSON.stringify({
+        actions: [
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'safe-channel',
+              type: 'GUILD_TEXT',
+              category: 'KOSMO Testing',
+            },
+          },
+          {
+            type: 'createRole',
+            payload: {
+              name: 'Founder',
+            },
+          },
+        ],
+      });
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(unsafePlan));
+      const result = await manager.generatePlan('create channel and founder role', authorizedContext);
+
+      // Must be blocked by PermissionValidator
+      expect(result.success).toBe(false);
+      expect(result.validation.blocked).toBe(true);
+      expect(result.plan?.status).toBe('REJECTED');
+      expect(result.plan?.riskLevel).toBe('BLOCKED');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // TEST 10 — Phase 4A Community Setup Workflows
+  // -------------------------------------------------------------------------
+  describe('TEST 10: Phase 4A Community Setup Workflows', () => {
+    test('10a: Create onboarding area with category and child channels in same plan', async () => {
+      const mockResponse = JSON.stringify({
+        planName: 'Onboarding Area Setup',
+        explanation: 'Create Onboarding category with welcome and introductions channels',
+        actions: [
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'Onboarding',
+              type: 'GUILD_CATEGORY',
+            },
+          },
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'welcome',
+              type: 'GUILD_TEXT',
+              category: 'Onboarding',
+            },
+          },
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'introductions',
+              type: 'GUILD_TEXT',
+              category: 'Onboarding',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockResponse);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Create an onboarding area with a category called Onboarding, a welcome channel and an introductions channel inside it.',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.status).toBe('PROPOSED');
+      expect(result.plan?.actions).toHaveLength(3);
+
+      const act1 = result.plan?.actions[0];
+      expect(act1?.type).toBe('createChannel');
+      if (act1?.type === 'createChannel') {
+        expect(act1.payload.name).toBe('Onboarding');
+        expect(act1.payload.type).toBe('GUILD_CATEGORY');
+      }
+
+      const act2 = result.plan?.actions[1];
+      expect(act2?.type).toBe('createChannel');
+      if (act2?.type === 'createChannel') {
+        expect(act2.payload.name).toBe('welcome');
+        expect(act2.payload.type).toBe('GUILD_TEXT');
+        expect(act2.payload.category).toBe('Onboarding');
+      }
+
+      const act3 = result.plan?.actions[2];
+      expect(act3?.type).toBe('createChannel');
+      if (act3?.type === 'createChannel') {
+        expect(act3.payload.name).toBe('introductions');
+        expect(act3.payload.type).toBe('GUILD_TEXT');
+        expect(act3.payload.category).toBe('Onboarding');
+      }
+
+      expect(result.validation.valid).toBe(true);
+      expect(result.validation.blocked).toBe(false);
+      expect(result.plan?.riskLevel).toBe('LOW');
+    });
+
+    test('10b: Multiple channels can be placed inside an existing category', async () => {
+      const mockResponse = JSON.stringify({
+        planName: 'Setup channels in KOSMO Testing category',
+        explanation: 'Create tests and results channels in existing KOSMO Testing category',
+        actions: [
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'bot-tests',
+              type: 'GUILD_TEXT',
+              category: 'KOSMO Testing',
+            },
+          },
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'test-results',
+              type: 'GUILD_TEXT',
+              category: 'KOSMO Testing',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockResponse);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Create bot-tests and test-results inside KOSMO Testing',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.actions).toHaveLength(2);
+
+      const act1 = result.plan?.actions[0];
+      const act2 = result.plan?.actions[1];
+
+      expect(act1?.type).toBe('createChannel');
+      if (act1?.type === 'createChannel') {
+        expect(act1.payload.category).toBe('KOSMO Testing');
+      }
+
+      expect(act2?.type).toBe('createChannel');
+      if (act2?.type === 'createChannel') {
+        expect(act2.payload.category).toBe('KOSMO Testing');
+      }
+
+      expect(result.validation.valid).toBe(true);
+      expect(result.validation.blocked).toBe(false);
+    });
+
+    test('10c: Normal community setup can contain multiple safe action types', async () => {
+      const mockResponse = JSON.stringify({
+        planName: 'Community Onboarding Setup',
+        explanation: 'Create Contributor role and Resources category with faq channel',
+        actions: [
+          {
+            type: 'createRole',
+            payload: {
+              name: 'Contributor',
+              color: 0x2ecc71,
+              hoist: true,
+            },
+          },
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'Resources',
+              type: 'GUILD_CATEGORY',
+            },
+          },
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'faq',
+              type: 'GUILD_TEXT',
+              category: 'Resources',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockResponse);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Create Contributor role and Resources category with faq channel',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.status).toBe('PROPOSED');
+      expect(result.plan?.actions).toHaveLength(3);
+      expect(result.validation.valid).toBe(true);
+      expect(result.validation.blocked).toBe(false);
+      expect(result.plan?.riskLevel).toBe('LOW');
+    });
+
+    test('10d: Phase 3 safety rules still apply to Phase 4A setup requests', async () => {
+      const mockResponse = JSON.stringify({
+        planName: 'Setup with Privileged Role Violation',
+        explanation: 'Create Onboarding category, welcome channel, and Founder role',
+        actions: [
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'Onboarding',
+              type: 'GUILD_CATEGORY',
+            },
+          },
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'welcome',
+              type: 'GUILD_TEXT',
+              category: 'Onboarding',
+            },
+          },
+          {
+            type: 'createRole',
+            payload: {
+              name: 'Founder',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockResponse);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Create Onboarding category with welcome channel and Founder role',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.validation.blocked).toBe(true);
+      expect(result.plan?.riskLevel).toBe('BLOCKED');
+      expect(result.plan?.status).toBe('REJECTED');
+
+      const reasons = result.validation.blockedReasons || [];
+      expect(reasons.some((r) => r.toLowerCase().includes('privileged role'))).toBe(true);
+    });
+
+    test('10e: Category aliases parent and categoryName normalize to category', async () => {
+      const mockResponse = JSON.stringify({
+        planName: 'Setup with Aliased Category Fields',
+        explanation: 'Create channels using parent and categoryName aliases',
+        actions: [
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'channel-parent',
+              type: 'GUILD_TEXT',
+              parent: 'Onboarding',
+            },
+          },
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'channel-catname',
+              type: 'GUILD_TEXT',
+              categoryName: 'Onboarding',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockResponse);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Create channel-parent and channel-catname under Onboarding',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.actions).toHaveLength(2);
+
+      const act1 = result.plan?.actions[0];
+      const act2 = result.plan?.actions[1];
+
+      expect(act1?.type).toBe('createChannel');
+      if (act1?.type === 'createChannel') {
+        expect(act1.payload.category).toBe('Onboarding');
+      }
+
+      expect(act2?.type).toBe('createChannel');
+      if (act2?.type === 'createChannel') {
+        expect(act2.payload.category).toBe('Onboarding');
+      }
+
+      expect(result.validation.valid).toBe(true);
+    });
+
+    test('10f: Safely rejects malformed/invalid Phase 4A output without throwing', async () => {
+      // 1. Missing actions
+      const missingActionsOutput = JSON.stringify({
+        planName: 'Incomplete Plan',
+        explanation: 'No actions array here',
+      });
+      const manager1 = new NLManager(jest.fn().mockResolvedValue(missingActionsOutput));
+      const res1 = await manager1.generatePlan('setup community', authorizedContext);
+      expect(res1.success).toBe(false);
+      expect(res1.validation.valid).toBe(false);
+
+      // 2. Invalid action type
+      const invalidActionOutput = JSON.stringify({
+        actions: [
+          {
+            type: 'nukeEverything',
+            payload: { name: 'test' },
+          },
+        ],
+      });
+      const manager2 = new NLManager(jest.fn().mockResolvedValue(invalidActionOutput));
+      const res2 = await manager2.generatePlan('nuke community', authorizedContext);
+      expect(res2.success).toBe(false);
+      expect(res2.validation.valid).toBe(false);
+
+      // 3. Invalid channel type
+      const invalidChannelTypeOutput = JSON.stringify({
+        actions: [
+          {
+            type: 'createChannel',
+            payload: {
+              name: 'bad-channel',
+              type: 'INVALID_CHANNEL_TYPE',
+            },
+          },
+        ],
+      });
+      const manager3 = new NLManager(jest.fn().mockResolvedValue(invalidChannelTypeOutput));
+      const res3 = await manager3.generatePlan('create invalid channel', authorizedContext);
+      expect(res3.success).toBe(false);
+      expect(res3.validation.valid).toBe(false);
+
+      // 4. Malformed JSON
+      const malformedJsonOutput = '{"actions": [{"type": "createChannel", "payload": { "name": "bad"';
+      const manager4 = new NLManager(jest.fn().mockResolvedValue(malformedJsonOutput));
+      const res4 = await manager4.generatePlan('malformed json instruction', authorizedContext);
+      expect(res4.success).toBe(false);
+      expect(res4.validation.valid).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // TEST 11 — Phase 4B.1 Member Role Management
+  // -------------------------------------------------------------------------
+  describe('TEST 11: Phase 4B.1 Member Role Management', () => {
+    test('11a: Valid assignRole plan produces PROPOSED plan with MEDIUM risk', async () => {
+      const mockOutput = JSON.stringify({
+        planName: 'Assign Community Member Role',
+        explanation: 'Assign the Community Member role to the specified member.',
+        actions: [
+          {
+            type: 'assignRole',
+            payload: {
+              roleName: 'Community Member',
+              memberId: '123456789',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockOutput);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Give the Community Member role to user 123456789.',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.status).toBe('PROPOSED');
+      expect(result.plan?.actions).toHaveLength(1);
+
+      const action = result.plan?.actions[0];
+      expect(action?.type).toBe('assignRole');
+      if (action?.type === 'assignRole') {
+        expect(action.payload.roleName).toBe('Community Member');
+        expect(action.payload.memberId).toBe('123456789');
+      }
+
+      expect(result.validation.valid).toBe(true);
+      expect(result.validation.blocked).toBe(false);
+      expect(result.plan?.riskLevel).toBe('MEDIUM');
+    });
+
+    test('11b: Valid removeRole plan removes non-privileged role without blocking', async () => {
+      const mockOutput = JSON.stringify({
+        planName: 'Remove Beta Tester Role',
+        explanation: 'Remove the Beta Tester role from user 123456789.',
+        actions: [
+          {
+            type: 'removeRole',
+            payload: {
+              roleName: 'Beta Tester',
+              memberId: '123456789',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockOutput);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Remove the Beta Tester role from user 123456789.',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.status).toBe('PROPOSED');
+      expect(result.plan?.actions).toHaveLength(1);
+
+      const action = result.plan?.actions[0];
+      expect(action?.type).toBe('removeRole');
+      if (action?.type === 'removeRole') {
+        expect(action.payload.roleName).toBe('Beta Tester');
+        expect(action.payload.memberId).toBe('123456789');
+      }
+
+      expect(result.validation.valid).toBe(true);
+      expect(result.validation.blocked).toBe(false);
+    });
+
+    test('11c: Privileged role assignment is blocked (Founder)', async () => {
+      const mockOutput = JSON.stringify({
+        planName: 'Assign Founder Role',
+        explanation: 'Attempt to assign Founder role to user 123456789.',
+        actions: [
+          {
+            type: 'assignRole',
+            payload: {
+              roleName: 'Founder',
+              memberId: '123456789',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockOutput);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Make user 123456789 a Founder',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.validation.blocked).toBe(true);
+      expect(result.plan?.riskLevel).toBe('BLOCKED');
+      expect(result.plan?.status).toBe('REJECTED');
+
+      const blockedReasons = result.validation.blockedReasons || [];
+      expect(blockedReasons.some((r) => r.toLowerCase().includes('privileged role'))).toBe(true);
+    });
+
+    test('11d: Privileged role removal is blocked (Admin)', async () => {
+      const mockOutput = JSON.stringify({
+        planName: 'Remove Admin Role',
+        explanation: 'Attempt to remove Admin role from user 123456789.',
+        actions: [
+          {
+            type: 'removeRole',
+            payload: {
+              roleName: 'Admin',
+              memberId: '123456789',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mockOutput);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Remove Admin role from user 123456789',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.validation.blocked).toBe(true);
+      expect(result.plan?.riskLevel).toBe('BLOCKED');
+      expect(result.plan?.status).toBe('REJECTED');
+    });
+
+    test('11e: Member ID must not be fabricated; malformed/empty memberId fails safely', async () => {
+      // 1. Empty memberId fails validation
+      const emptyMemberOutput = JSON.stringify({
+        planName: 'Assign Role Empty Member',
+        explanation: 'Assign role with empty memberId',
+        actions: [
+          {
+            type: 'assignRole',
+            payload: {
+              roleName: 'Member',
+              memberId: '',
+            },
+          },
+        ],
+      });
+
+      const manager1 = new NLManager(jest.fn().mockResolvedValue(emptyMemberOutput));
+      const res1 = await manager1.generatePlan('assign role Member to nobody', authorizedContext);
+
+      expect(res1.success).toBe(false);
+      expect(res1.validation.valid).toBe(false);
+      expect(res1.validation.errors).toContain('Member ID cannot be empty for role assignment.');
+
+      // 2. Whitespace-only memberId fails validation
+      const whitespaceMemberOutput = JSON.stringify({
+        planName: 'Remove Role Empty Member',
+        explanation: 'Remove role with whitespace memberId',
+        actions: [
+          {
+            type: 'removeRole',
+            payload: {
+              roleName: 'Member',
+              memberId: '   ',
+            },
+          },
+        ],
+      });
+
+      const manager2 = new NLManager(jest.fn().mockResolvedValue(whitespaceMemberOutput));
+      const res2 = await manager2.generatePlan('remove role Member with bad id', authorizedContext);
+
+      expect(res2.success).toBe(false);
+      expect(res2.validation.valid).toBe(false);
+      expect(res2.validation.errors).toContain('Member ID cannot be empty for role removal.');
+    });
+
+    test('11f: Unsupported action type remains rejected (e.g. banMember)', async () => {
+      const unsupportedOutput = JSON.stringify({
+        planName: 'Ban Member Plan',
+        explanation: 'Attempt to ban user 123456789',
+        actions: [
+          {
+            type: 'banMember',
+            payload: {
+              memberId: '123456789',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(unsupportedOutput);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan('ban user 123456789', authorizedContext);
+
+      expect(result.success).toBe(false);
+      expect(result.validation.valid).toBe(false);
+      expect(result.validation.errors.some((e) => e.includes('Unsupported action type: banMember'))).toBe(true);
+    });
+
+    test('11g: Mixed safe + unsafe member plan is blocked completely', async () => {
+      const mixedOutput = JSON.stringify({
+        planName: 'Mixed Safe and Privileged Role Assignment',
+        explanation: 'Assign Community Member and Founder roles',
+        actions: [
+          {
+            type: 'assignRole',
+            payload: {
+              roleName: 'Community Member',
+              memberId: '123456789',
+            },
+          },
+          {
+            type: 'assignRole',
+            payload: {
+              roleName: 'Founder',
+              memberId: '987654321',
+            },
+          },
+        ],
+      });
+
+      const mockLLM: LLMCompletionFn = jest.fn().mockResolvedValue(mixedOutput);
+      const manager = new NLManager(mockLLM);
+
+      const result = await manager.generatePlan(
+        'Give Community Member to 123456789 and Founder to 987654321',
+        authorizedContext
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.validation.blocked).toBe(true);
+      expect(result.plan?.riskLevel).toBe('BLOCKED');
+      expect(result.plan?.status).toBe('REJECTED');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // TEST 12 — Robust JSON Extraction & Parsing Regression Tests
+  // -------------------------------------------------------------------------
+  describe('TEST 12: Robust JSON Extraction & Parsing Regression Tests', () => {
+    test('12a: Valid raw JSON produces expected Plan without errors', async () => {
+      const validJSON = JSON.stringify({
+        planName: 'Configure Role Gated Channels',
+        explanation: 'Apply permission templates to channels',
+        actions: [
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: 'tech-and-engineering',
+              permissionOverwrites: [
+                { id: '1544704957566033963', allow: [], deny: ['ViewChannel'] },
+                { id: 'Tech & Engineering', allow: ['ViewChannel', 'SendMessages'], deny: [] },
+              ],
+            },
+          },
+        ],
+      });
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(validJSON));
+      const result = await manager.generatePlan('configure role gated channels', authorizedContext);
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.name).toBe('Configure Role Gated Channels');
+      expect(result.plan?.actions).toHaveLength(1);
+      expect(result.plan?.actions[0].type).toBe('applyPermissionTemplate');
+    });
+
+    test('12b: JSON inside markdown code fences with conversational prefix and suffix is extracted and parsed', async () => {
+      const wrappedResponse = `Here is the requested plan for configuring channels:
+
+\`\`\`json
+{
+  "planName": "Fenced Plan",
+  "explanation": "Extracted from markdown fences",
+  "actions": [
+    {
+      "type": "createChannel",
+      "payload": {
+        "name": "announcements-v2",
+        "type": "GUILD_TEXT"
+      }
+    }
+  ]
+}
+\`\`\`
+
+Let me know if you would like me to adjust any of these settings!`;
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(wrappedResponse));
+      const result = await manager.generatePlan('create announcements-v2', authorizedContext);
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.name).toBe('Fenced Plan');
+      expect(result.plan?.actions).toHaveLength(1);
+    });
+
+    test('12c: Natural-language/non-JSON response is rejected safely with clear error', async () => {
+      const conversationalResponse =
+        'The user wants to configure existing Guild Discussion channels as role-gated channels. They have provided a mapping of channel names to role names. The channels already exist...';
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(conversationalResponse));
+      const result = await manager.generatePlan('configure channels', authorizedContext);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Failed to parse AI JSON response');
+      expect(result.error).toContain('conversational or non-JSON text response');
+      expect(result.validation.valid).toBe(false);
+    });
+
+    test('12d: Malformed JSON syntax is rejected safely without crashing', async () => {
+      const malformedResponse = '```json\n{ "planName": "Broken Plan", "actions": [ { "type": "createRole" \n```';
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(malformedResponse));
+      const result = await manager.generatePlan('broken plan instruction', authorizedContext);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Failed to parse AI JSON response');
+      expect(result.validation.valid).toBe(false);
+    });
+
+    test('12e: Invalid structured action (unsupported action type) is rejected safely', async () => {
+      const invalidActionJSON = JSON.stringify({
+        planName: 'Invalid Action Plan',
+        explanation: 'Contains unknown action type',
+        actions: [
+          {
+            type: 'nukeEntireServer',
+            payload: {},
+          },
+        ],
+      });
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(invalidActionJSON));
+      const result = await manager.generatePlan('nuke server', authorizedContext);
+
+      expect(result.success).toBe(false);
+      expect(result.validation.valid).toBe(false);
+      expect(result.validation.errors.some((e) => e.includes('Unsupported action type: nukeEntireServer'))).toBe(true);
+    });
+
+    test('12f: Response with <think>...</think> reasoning tags is cleaned and parsed properly', async () => {
+      const reasoningWithJSON = `<think>
+The user wants to configure channels. Let's think about permissions...
+We should output a valid JSON object.
+</think>
+{
+  "planName": "Post-Reasoning Plan",
+  "explanation": "Successfully extracted after reasoning tags",
+  "actions": [
+    {
+      "type": "createChannel",
+      "payload": {
+        "name": "reasoning-test",
+        "type": "GUILD_TEXT"
+      }
+    }
+  ]
+}`;
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(reasoningWithJSON));
+      const result = await manager.generatePlan('test reasoning', authorizedContext);
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.name).toBe('Post-Reasoning Plan');
+      expect(result.plan?.actions[0].type).toBe('createChannel');
+    });
+
+    test('12g: extractAndParseJSON handles trailing commas and bare arrays', () => {
+      const manager = new NLManager();
+
+      // Trailing comma
+      const withTrailingComma = '{\n  "planName": "Clean Comma",\n  "actions": [\n    { "type": "createRole", "payload": { "name": "R1" } },\n  ],\n}';
+      const parsed = manager.extractAndParseJSON(withTrailingComma);
+      expect(parsed.planName).toBe('Clean Comma');
+      expect(parsed.actions).toHaveLength(1);
+
+      // Bare array
+      const bareArray = '[{ "type": "createRole", "payload": { "name": "R2" } }]';
+      const parsedArray = manager.extractAndParseJSON(bareArray);
+      expect(parsedArray.actions).toHaveLength(1);
+
+      // Empty / non-string fails
+      expect(() => manager.extractAndParseJSON('')).toThrow('Empty or invalid LLM response string.');
+      expect(() => manager.extractAndParseJSON('Just plain text with no braces')).toThrow('conversational or non-JSON');
+    });
+
+    test('12h: Guild Discussion mappings use channel names as targetName and roles as permissionOverwrites.id', async () => {
+      const mockDiscussionPlan = JSON.stringify({
+        planName: 'Configure Guild Discussion role-gated channels',
+        explanation: 'Set up 5 discussion channels with their dedicated roles while preserving staff access',
+        actions: [
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: '#tech-and-engineering',
+              permissionOverwrites: [
+                { id: '@everyone', allow: [], deny: ['ViewChannel'] },
+                { id: 'Tech & Engineering', allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'], deny: [] },
+              ],
+            },
+          },
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: 'business-and-strategy',
+              permissionOverwrites: [
+                { id: '@everyone', allow: [], deny: ['ViewChannel'] },
+                { id: 'Business & Strategy', allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'], deny: [] },
+              ],
+            },
+          },
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: 'academia-and-research',
+              permissionOverwrites: [
+                { id: '@everyone', allow: [], deny: ['ViewChannel'] },
+                { id: 'Academia & Education', allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'], deny: [] },
+              ],
+            },
+          },
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: 'legal-and-policy',
+              permissionOverwrites: [
+                { id: '@everyone', allow: [], deny: ['ViewChannel'] },
+                { id: 'Law & Compliance', allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'], deny: [] },
+              ],
+            },
+          },
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: 'creatives-lounge',
+              permissionOverwrites: [
+                { id: '@everyone', allow: [], deny: ['ViewChannel'] },
+                { id: 'Creative & Design', allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'], deny: [] },
+              ],
+            },
+          },
+        ],
+      });
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(mockDiscussionPlan));
+      const result = await manager.generatePlan('Configure the existing Guild Discussion channels', authorizedContext);
+
+      expect(result.success).toBe(true);
+      expect(result.plan?.actions).toHaveLength(5);
+
+      const expectedChannels = [
+        'tech-and-engineering',
+        'business-and-strategy',
+        'academia-and-research',
+        'legal-and-policy',
+        'creatives-lounge',
+      ];
+
+      const expectedRoles = [
+        'Tech & Engineering',
+        'Business & Strategy',
+        'Academia & Education',
+        'Law & Compliance',
+        'Creative & Design',
+      ];
+
+      for (let i = 0; i < 5; i++) {
+        const act: any = result.plan?.actions[i];
+        expect(act?.type).toBe('applyPermissionTemplate');
+        // targetName MUST be channel name (with # stripped)
+        expect(act?.payload.targetName).toBe(expectedChannels[i]);
+        // permissionOverwrites MUST include the category role
+        const roleOw = act?.payload.permissionOverwrites.find(
+          (ow: any) => ow.id.toLowerCase() === expectedRoles[i].toLowerCase()
+        );
+        expect(roleOw).toBeDefined();
+        expect(roleOw.allow).toContain('ViewChannel');
+
+        // Staff roles MUST be preserved
+        const staffExpected = ['Kosmo Founder', 'Team Kosmo', 'Moderator', 'KosmoBot'];
+        for (const s of staffExpected) {
+          const sOw = act?.payload.permissionOverwrites.find(
+            (ow: any) => ow.id.toLowerCase() === s.toLowerCase()
+          );
+          expect(sOw).toBeDefined();
+          expect(sOw.allow).toContain('ViewChannel');
+        }
+      }
+    });
+
+    test('12i: Rejects plan when privileged role is accidentally supplied as targetName', async () => {
+      const mockInvalidPlan = JSON.stringify({
+        planName: 'Confused targetName plan',
+        actions: [
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: 'Founder',
+              permissionOverwrites: [{ id: '@everyone', deny: ['ViewChannel'] }],
+            },
+          },
+        ],
+      });
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(mockInvalidPlan));
+      const result = await manager.generatePlan('Role-gate Founder', authorizedContext);
+
+      expect(result.success).toBe(false);
+      expect(result.validation.blocked).toBe(true);
+      expect(result.validation.blockedReasons?.[0]).toMatch(/is a role name/i);
+    });
+
+    test('12j: Specifically proves academia-and-education cannot become targetName merely because Academia & Education is the mapped role', async () => {
+      const mockInvalidPlan = JSON.stringify({
+        planName: 'Confused role-slug plan',
+        explanation: 'Attempting to use role slug academia-and-education instead of channel academia-and-research',
+        actions: [
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: 'academia-and-education',
+              permissionOverwrites: [
+                { id: '@everyone', deny: ['ViewChannel'] },
+                { id: 'Academia & Education', allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'] },
+              ],
+            },
+          },
+        ],
+      });
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(mockInvalidPlan));
+      const result = await manager.generatePlan('Configure academia-and-education permissions', authorizedContext);
+
+      expect(result.success).toBe(false);
+      expect(result.validation.blocked).toBe(true);
+      expect(result.validation.valid).toBe(false);
+      expect(result.validation.blockedReasons?.[0]).toMatch(
+        /Target "academia-and-education".*resolves to a role.*not a channel or category/i
+      );
+    });
+
+    test('12k: Rejects plan when any discussion role name or non-channel role slug is used as targetName', async () => {
+      const invalidTargets = [
+        'Academia & Education',
+        'Tech & Engineering',
+        'Business & Strategy',
+        'Law & Compliance',
+        'Creative & Design',
+        'law-and-compliance',
+        'creative-and-design',
+      ];
+
+      for (const target of invalidTargets) {
+        const mockPlan = JSON.stringify({
+          planName: `Invalid targetName plan: ${target}`,
+          actions: [
+            {
+              type: 'applyPermissionTemplate',
+              payload: {
+                targetName: target,
+                permissionOverwrites: [{ id: '@everyone', deny: ['ViewChannel'] }],
+              },
+            },
+          ],
+        });
+
+        const manager = new NLManager(jest.fn().mockResolvedValue(mockPlan));
+        const result = await manager.generatePlan(`Configure permissions for ${target}`, authorizedContext);
+
+        expect(result.success).toBe(false);
+        expect(result.validation.blocked).toBe(true);
+        expect(result.validation.blockedReasons?.[0]).toMatch(/is a role name/i);
+      }
+    });
+
+    test('12l: Regression test for all 5 Guild Discussion mappings individually', async () => {
+      const mappings = [
+        { channel: 'tech-and-engineering', role: 'Tech & Engineering' },
+        { channel: 'business-and-strategy', role: 'Business & Strategy' },
+        { channel: 'academia-and-research', role: 'Academia & Education' },
+        { channel: 'legal-and-policy', role: 'Law & Compliance' },
+        { channel: 'creatives-lounge', role: 'Creative & Design' },
+      ];
+
+      for (const m of mappings) {
+        const mockPlan = JSON.stringify({
+          planName: `Setup ${m.channel}`,
+          actions: [
+            {
+              type: 'applyPermissionTemplate',
+              payload: {
+                targetName: m.channel,
+                permissionOverwrites: [
+                  { id: '@everyone', deny: ['ViewChannel'] },
+                  { id: m.role, allow: ['ViewChannel', 'SendMessages'] },
+                ],
+              },
+            },
+          ],
+        });
+
+        const manager = new NLManager(jest.fn().mockResolvedValue(mockPlan));
+        const result = await manager.generatePlan(`Configure ${m.channel}`, authorizedContext);
+
+        expect(result.success).toBe(true);
+        expect(result.plan?.actions[0].type).toBe('applyPermissionTemplate');
+        const act: any = result.plan?.actions[0];
+        expect(act.payload.targetName).toBe(m.channel);
+        expect(act.payload.permissionOverwrites.some((ow: any) => ow.id === m.role)).toBe(true);
+      }
+    });
+
+    test('12m: Enforces safe ordering (KosmoBot -> Founder -> Team -> Mod -> target role -> @everyone) on generated role-gated permission templates', async () => {
+      const mockPlan = JSON.stringify({
+        planName: 'Setup legal-and-policy',
+        actions: [
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: '1545692538780778587',
+              permissionOverwrites: [
+                { id: '@everyone', deny: ['ViewChannel'] },
+                { id: 'Law & Compliance', allow: ['ViewChannel', 'SendMessages'] },
+                { id: 'Kosmo Founder', allow: ['ViewChannel', 'SendMessages'] },
+                { id: 'Team Kosmo', allow: ['ViewChannel', 'SendMessages'] },
+                { id: 'Moderator', allow: ['ViewChannel', 'SendMessages'] },
+                { id: 'KosmoBot', allow: ['ViewChannel', 'SendMessages'] },
+              ],
+            },
+          },
+        ],
+      });
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(mockPlan));
+      const result = await manager.generatePlan('Configure legal-and-policy', authorizedContext);
+
+      expect(result.success).toBe(true);
+      const act: any = result.plan?.actions[0];
+      expect(act.type).toBe('applyPermissionTemplate');
+      const overwrites = act.payload.permissionOverwrites;
+
+      // Assert exact safe ordering
+      expect(overwrites[0].id).toBe('KosmoBot');
+      expect(overwrites[1].id).toBe('Kosmo Founder');
+      expect(overwrites[2].id).toBe('Team Kosmo');
+      expect(overwrites[3].id).toBe('Moderator');
+      expect(overwrites[4].id).toBe('Law & Compliance');
+      expect(overwrites[5].id).toBe('@everyone');
+    });
   });
 });
