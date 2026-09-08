@@ -31,7 +31,7 @@ class RedisCache implements Cache {
       throw new Error('REDIS_URL is not defined in .env');
     }
     this.client = new Redis(url);
-    this.client.on('error', (err) => console.error('Redis error:', err));
+    this.client.on('error', (err: any) => console.error('Redis error:', err));
   }
 
   async set<T>(key: string, value: T, ttlSeconds?: number): Promise<void> {
