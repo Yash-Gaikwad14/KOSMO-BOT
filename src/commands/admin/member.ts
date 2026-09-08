@@ -3,6 +3,7 @@ import {
   ChatInputCommandInteraction,
   EmbedBuilder,
   GuildMember,
+  Role,
 } from 'discord.js';
 
 export const data = new SlashCommandBuilder()
@@ -71,11 +72,11 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
   let rolesFormatted = 'No additional roles';
   if (member.roles && member.roles.cache) {
     const rolesList = Array.from(member.roles.cache.values())
-      .filter((r: any) => r.id !== guild.id && r.name !== '@everyone')
-      .sort((a: any, b: any) => (b.position ?? 0) - (a.position ?? 0));
+      .filter((r: Role) => r.id !== guild.id && r.name !== '@everyone')
+      .sort((a: Role, b: Role) => (b.position ?? 0) - (a.position ?? 0));
 
     if (rolesList.length > 0) {
-      const names = rolesList.map((r: any) => r.name).join(', ');
+      const names = rolesList.map((r: Role) => r.name).join(', ');
       rolesFormatted = names.length > 1024 ? `${names.substring(0, 1020)}...` : names;
     }
   }

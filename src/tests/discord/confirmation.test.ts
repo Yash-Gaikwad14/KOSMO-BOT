@@ -8,7 +8,9 @@ import { DiscordAction, Plan } from '../../services/discord/types';
 
 describe('Phase 3D Human Confirmation & Controlled Discord Execution', () => {
   const founderRoleIds = ['111111111111111111'];
+  const liveFounderRoleIds = ['1544750811207442532'];
   const teamKosmoRoleIds = ['222222222222222222'];
+  const liveTeamKosmoRoleIds = ['1544801399068434443'];
   const adminRoleIds = ['333333333333333333'];
   const moderatorRoleIds = ['444444444444444444'];
   const unauthorizedRoleIds = ['999999999999999999'];
@@ -80,11 +82,35 @@ describe('Phase 3D Human Confirmation & Controlled Discord Execution', () => {
       expect(mockGuild.roles.create).toHaveBeenCalledTimes(1);
     });
 
+    test('2b. FOUNDER with live role ID can confirm and execute a valid plan', async () => {
+      const plan = createTestPlan();
+      const nonOwnerContext = { userId: 'founder-user', guildOwnerId: 'owner-id-123' };
+
+      const result = await confirmAndExecutePlan(mockGuild, plan.id, liveFounderRoleIds, nonOwnerContext);
+
+      expect(result.success).toBe(true);
+      expect(result.status).toBe('EXECUTED');
+      expect(plan.status).toBe('EXECUTED');
+      expect(mockGuild.roles.create).toHaveBeenCalledTimes(1);
+    });
+
     test('3. TEAM_KOSMO can confirm and execute a valid plan', async () => {
       const plan = createTestPlan();
       const nonOwnerContext = { userId: 'team-user', guildOwnerId: 'owner-id-123' };
 
       const result = await confirmAndExecutePlan(mockGuild, plan.id, teamKosmoRoleIds, nonOwnerContext);
+
+      expect(result.success).toBe(true);
+      expect(result.status).toBe('EXECUTED');
+      expect(plan.status).toBe('EXECUTED');
+      expect(mockGuild.roles.create).toHaveBeenCalledTimes(1);
+    });
+
+    test('3b. TEAM_KOSMO with live role ID can confirm and execute a valid plan', async () => {
+      const plan = createTestPlan();
+      const nonOwnerContext = { userId: 'team-user', guildOwnerId: 'owner-id-123' };
+
+      const result = await confirmAndExecutePlan(mockGuild, plan.id, liveTeamKosmoRoleIds, nonOwnerContext);
 
       expect(result.success).toBe(true);
       expect(result.status).toBe('EXECUTED');
@@ -265,6 +291,48 @@ describe('Phase 3D Human Confirmation & Controlled Discord Execution', () => {
       expect(mockButtonInteraction.update).toHaveBeenCalledTimes(1);
       const updatePayload = (mockButtonInteraction.update as jest.Mock).mock.calls[0][0];
       expect(updatePayload.embeds).toBeDefined();
+      expect(updatePayload.embeds[0].data.title).toContain('CONFIRMED & EXECUTED');
+      expect(plan.status).toBe('EXECUTED');
+      expect(mockGuild.roles.create).toHaveBeenCalledTimes(1);
+    });
+
+    test('13b. Clicking [Confirm] button as live Kosmo Founder confirms and updates embed', async () => {
+      const plan = createTestPlan();
+
+      const mockButtonInteraction = {
+        customId: `kosmo_confirm_${plan.id}`,
+        guild: mockGuild,
+        user: { id: 'aditya-founder-id', username: 'AdityaFounder' },
+        member: { roles: liveFounderRoleIds },
+        reply: jest.fn(),
+        update: jest.fn(),
+      } as unknown as ButtonInteraction;
+
+      await handleConfirmationButton(mockButtonInteraction);
+
+      expect(mockButtonInteraction.update).toHaveBeenCalledTimes(1);
+      const updatePayload = (mockButtonInteraction.update as jest.Mock).mock.calls[0][0];
+      expect(updatePayload.embeds[0].data.title).toContain('CONFIRMED & EXECUTED');
+      expect(plan.status).toBe('EXECUTED');
+      expect(mockGuild.roles.create).toHaveBeenCalledTimes(1);
+    });
+
+    test('13c. Clicking [Confirm] button as live Team Kosmo confirms and updates embed', async () => {
+      const plan = createTestPlan();
+
+      const mockButtonInteraction = {
+        customId: `kosmo_confirm_${plan.id}`,
+        guild: mockGuild,
+        user: { id: 'anmol-team-id', username: 'AnmolTeam' },
+        member: { roles: liveTeamKosmoRoleIds },
+        reply: jest.fn(),
+        update: jest.fn(),
+      } as unknown as ButtonInteraction;
+
+      await handleConfirmationButton(mockButtonInteraction);
+
+      expect(mockButtonInteraction.update).toHaveBeenCalledTimes(1);
+      const updatePayload = (mockButtonInteraction.update as jest.Mock).mock.calls[0][0];
       expect(updatePayload.embeds[0].data.title).toContain('CONFIRMED & EXECUTED');
       expect(plan.status).toBe('EXECUTED');
       expect(mockGuild.roles.create).toHaveBeenCalledTimes(1);

@@ -1468,4 +1468,422 @@ Hope this helps!`;
       expect(result.plan?.status).toBe('REJECTED');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // TEST 12 — Robust JSON Extraction & Parsing Regression Tests
+  // -------------------------------------------------------------------------
+  describe('TEST 12: Robust JSON Extraction & Parsing Regression Tests', () => {
+    test('12a: Valid raw JSON produces expected Plan without errors', async () => {
+      const validJSON = JSON.stringify({
+        planName: 'Configure Role Gated Channels',
+        explanation: 'Apply permission templates to channels',
+        actions: [
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: 'tech-and-engineering',
+              permissionOverwrites: [
+                { id: '1544704957566033963', allow: [], deny: ['ViewChannel'] },
+                { id: 'Tech & Engineering', allow: ['ViewChannel', 'SendMessages'], deny: [] },
+              ],
+            },
+          },
+        ],
+      });
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(validJSON));
+      const result = await manager.generatePlan('configure role gated channels', authorizedContext);
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.name).toBe('Configure Role Gated Channels');
+      expect(result.plan?.actions).toHaveLength(1);
+      expect(result.plan?.actions[0].type).toBe('applyPermissionTemplate');
+    });
+
+    test('12b: JSON inside markdown code fences with conversational prefix and suffix is extracted and parsed', async () => {
+      const wrappedResponse = `Here is the requested plan for configuring channels:
+
+\`\`\`json
+{
+  "planName": "Fenced Plan",
+  "explanation": "Extracted from markdown fences",
+  "actions": [
+    {
+      "type": "createChannel",
+      "payload": {
+        "name": "announcements-v2",
+        "type": "GUILD_TEXT"
+      }
+    }
+  ]
+}
+\`\`\`
+
+Let me know if you would like me to adjust any of these settings!`;
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(wrappedResponse));
+      const result = await manager.generatePlan('create announcements-v2', authorizedContext);
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.name).toBe('Fenced Plan');
+      expect(result.plan?.actions).toHaveLength(1);
+    });
+
+    test('12c: Natural-language/non-JSON response is rejected safely with clear error', async () => {
+      const conversationalResponse =
+        'The user wants to configure existing Guild Discussion channels as role-gated channels. They have provided a mapping of channel names to role names. The channels already exist...';
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(conversationalResponse));
+      const result = await manager.generatePlan('configure channels', authorizedContext);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Failed to parse AI JSON response');
+      expect(result.error).toContain('conversational or non-JSON text response');
+      expect(result.validation.valid).toBe(false);
+    });
+
+    test('12d: Malformed JSON syntax is rejected safely without crashing', async () => {
+      const malformedResponse = '```json\n{ "planName": "Broken Plan", "actions": [ { "type": "createRole" \n```';
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(malformedResponse));
+      const result = await manager.generatePlan('broken plan instruction', authorizedContext);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Failed to parse AI JSON response');
+      expect(result.validation.valid).toBe(false);
+    });
+
+    test('12e: Invalid structured action (unsupported action type) is rejected safely', async () => {
+      const invalidActionJSON = JSON.stringify({
+        planName: 'Invalid Action Plan',
+        explanation: 'Contains unknown action type',
+        actions: [
+          {
+            type: 'nukeEntireServer',
+            payload: {},
+          },
+        ],
+      });
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(invalidActionJSON));
+      const result = await manager.generatePlan('nuke server', authorizedContext);
+
+      expect(result.success).toBe(false);
+      expect(result.validation.valid).toBe(false);
+      expect(result.validation.errors.some((e) => e.includes('Unsupported action type: nukeEntireServer'))).toBe(true);
+    });
+
+    test('12f: Response with <think>...</think> reasoning tags is cleaned and parsed properly', async () => {
+      const reasoningWithJSON = `<think>
+The user wants to configure channels. Let's think about permissions...
+We should output a valid JSON object.
+</think>
+{
+  "planName": "Post-Reasoning Plan",
+  "explanation": "Successfully extracted after reasoning tags",
+  "actions": [
+    {
+      "type": "createChannel",
+      "payload": {
+        "name": "reasoning-test",
+        "type": "GUILD_TEXT"
+      }
+    }
+  ]
+}`;
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(reasoningWithJSON));
+      const result = await manager.generatePlan('test reasoning', authorizedContext);
+
+      expect(result.success).toBe(true);
+      expect(result.plan).toBeDefined();
+      expect(result.plan?.name).toBe('Post-Reasoning Plan');
+      expect(result.plan?.actions[0].type).toBe('createChannel');
+    });
+
+    test('12g: extractAndParseJSON handles trailing commas and bare arrays', () => {
+      const manager = new NLManager();
+
+      // Trailing comma
+      const withTrailingComma = '{\n  "planName": "Clean Comma",\n  "actions": [\n    { "type": "createRole", "payload": { "name": "R1" } },\n  ],\n}';
+      const parsed = manager.extractAndParseJSON(withTrailingComma);
+      expect(parsed.planName).toBe('Clean Comma');
+      expect(parsed.actions).toHaveLength(1);
+
+      // Bare array
+      const bareArray = '[{ "type": "createRole", "payload": { "name": "R2" } }]';
+      const parsedArray = manager.extractAndParseJSON(bareArray);
+      expect(parsedArray.actions).toHaveLength(1);
+
+      // Empty / non-string fails
+      expect(() => manager.extractAndParseJSON('')).toThrow('Empty or invalid LLM response string.');
+      expect(() => manager.extractAndParseJSON('Just plain text with no braces')).toThrow('conversational or non-JSON');
+    });
+
+    test('12h: Guild Discussion mappings use channel names as targetName and roles as permissionOverwrites.id', async () => {
+      const mockDiscussionPlan = JSON.stringify({
+        planName: 'Configure Guild Discussion role-gated channels',
+        explanation: 'Set up 5 discussion channels with their dedicated roles while preserving staff access',
+        actions: [
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: '#tech-and-engineering',
+              permissionOverwrites: [
+                { id: '@everyone', allow: [], deny: ['ViewChannel'] },
+                { id: 'Tech & Engineering', allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'], deny: [] },
+              ],
+            },
+          },
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: 'business-and-strategy',
+              permissionOverwrites: [
+                { id: '@everyone', allow: [], deny: ['ViewChannel'] },
+                { id: 'Business & Strategy', allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'], deny: [] },
+              ],
+            },
+          },
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: 'academia-and-research',
+              permissionOverwrites: [
+                { id: '@everyone', allow: [], deny: ['ViewChannel'] },
+                { id: 'Academia & Education', allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'], deny: [] },
+              ],
+            },
+          },
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: 'legal-and-policy',
+              permissionOverwrites: [
+                { id: '@everyone', allow: [], deny: ['ViewChannel'] },
+                { id: 'Law & Compliance', allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'], deny: [] },
+              ],
+            },
+          },
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: 'creatives-lounge',
+              permissionOverwrites: [
+                { id: '@everyone', allow: [], deny: ['ViewChannel'] },
+                { id: 'Creative & Design', allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'], deny: [] },
+              ],
+            },
+          },
+        ],
+      });
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(mockDiscussionPlan));
+      const result = await manager.generatePlan('Configure the existing Guild Discussion channels', authorizedContext);
+
+      expect(result.success).toBe(true);
+      expect(result.plan?.actions).toHaveLength(5);
+
+      const expectedChannels = [
+        'tech-and-engineering',
+        'business-and-strategy',
+        'academia-and-research',
+        'legal-and-policy',
+        'creatives-lounge',
+      ];
+
+      const expectedRoles = [
+        'Tech & Engineering',
+        'Business & Strategy',
+        'Academia & Education',
+        'Law & Compliance',
+        'Creative & Design',
+      ];
+
+      for (let i = 0; i < 5; i++) {
+        const act: any = result.plan?.actions[i];
+        expect(act?.type).toBe('applyPermissionTemplate');
+        // targetName MUST be channel name (with # stripped)
+        expect(act?.payload.targetName).toBe(expectedChannels[i]);
+        // permissionOverwrites MUST include the category role
+        const roleOw = act?.payload.permissionOverwrites.find(
+          (ow: any) => ow.id.toLowerCase() === expectedRoles[i].toLowerCase()
+        );
+        expect(roleOw).toBeDefined();
+        expect(roleOw.allow).toContain('ViewChannel');
+
+        // Staff roles MUST be preserved
+        const staffExpected = ['Kosmo Founder', 'Team Kosmo', 'Moderator', 'KosmoBot'];
+        for (const s of staffExpected) {
+          const sOw = act?.payload.permissionOverwrites.find(
+            (ow: any) => ow.id.toLowerCase() === s.toLowerCase()
+          );
+          expect(sOw).toBeDefined();
+          expect(sOw.allow).toContain('ViewChannel');
+        }
+      }
+    });
+
+    test('12i: Rejects plan when privileged role is accidentally supplied as targetName', async () => {
+      const mockInvalidPlan = JSON.stringify({
+        planName: 'Confused targetName plan',
+        actions: [
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: 'Founder',
+              permissionOverwrites: [{ id: '@everyone', deny: ['ViewChannel'] }],
+            },
+          },
+        ],
+      });
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(mockInvalidPlan));
+      const result = await manager.generatePlan('Role-gate Founder', authorizedContext);
+
+      expect(result.success).toBe(false);
+      expect(result.validation.blocked).toBe(true);
+      expect(result.validation.blockedReasons?.[0]).toMatch(/is a role name/i);
+    });
+
+    test('12j: Specifically proves academia-and-education cannot become targetName merely because Academia & Education is the mapped role', async () => {
+      const mockInvalidPlan = JSON.stringify({
+        planName: 'Confused role-slug plan',
+        explanation: 'Attempting to use role slug academia-and-education instead of channel academia-and-research',
+        actions: [
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: 'academia-and-education',
+              permissionOverwrites: [
+                { id: '@everyone', deny: ['ViewChannel'] },
+                { id: 'Academia & Education', allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'] },
+              ],
+            },
+          },
+        ],
+      });
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(mockInvalidPlan));
+      const result = await manager.generatePlan('Configure academia-and-education permissions', authorizedContext);
+
+      expect(result.success).toBe(false);
+      expect(result.validation.blocked).toBe(true);
+      expect(result.validation.valid).toBe(false);
+      expect(result.validation.blockedReasons?.[0]).toMatch(
+        /Target "academia-and-education".*resolves to a role.*not a channel or category/i
+      );
+    });
+
+    test('12k: Rejects plan when any discussion role name or non-channel role slug is used as targetName', async () => {
+      const invalidTargets = [
+        'Academia & Education',
+        'Tech & Engineering',
+        'Business & Strategy',
+        'Law & Compliance',
+        'Creative & Design',
+        'law-and-compliance',
+        'creative-and-design',
+      ];
+
+      for (const target of invalidTargets) {
+        const mockPlan = JSON.stringify({
+          planName: `Invalid targetName plan: ${target}`,
+          actions: [
+            {
+              type: 'applyPermissionTemplate',
+              payload: {
+                targetName: target,
+                permissionOverwrites: [{ id: '@everyone', deny: ['ViewChannel'] }],
+              },
+            },
+          ],
+        });
+
+        const manager = new NLManager(jest.fn().mockResolvedValue(mockPlan));
+        const result = await manager.generatePlan(`Configure permissions for ${target}`, authorizedContext);
+
+        expect(result.success).toBe(false);
+        expect(result.validation.blocked).toBe(true);
+        expect(result.validation.blockedReasons?.[0]).toMatch(/is a role name/i);
+      }
+    });
+
+    test('12l: Regression test for all 5 Guild Discussion mappings individually', async () => {
+      const mappings = [
+        { channel: 'tech-and-engineering', role: 'Tech & Engineering' },
+        { channel: 'business-and-strategy', role: 'Business & Strategy' },
+        { channel: 'academia-and-research', role: 'Academia & Education' },
+        { channel: 'legal-and-policy', role: 'Law & Compliance' },
+        { channel: 'creatives-lounge', role: 'Creative & Design' },
+      ];
+
+      for (const m of mappings) {
+        const mockPlan = JSON.stringify({
+          planName: `Setup ${m.channel}`,
+          actions: [
+            {
+              type: 'applyPermissionTemplate',
+              payload: {
+                targetName: m.channel,
+                permissionOverwrites: [
+                  { id: '@everyone', deny: ['ViewChannel'] },
+                  { id: m.role, allow: ['ViewChannel', 'SendMessages'] },
+                ],
+              },
+            },
+          ],
+        });
+
+        const manager = new NLManager(jest.fn().mockResolvedValue(mockPlan));
+        const result = await manager.generatePlan(`Configure ${m.channel}`, authorizedContext);
+
+        expect(result.success).toBe(true);
+        expect(result.plan?.actions[0].type).toBe('applyPermissionTemplate');
+        const act: any = result.plan?.actions[0];
+        expect(act.payload.targetName).toBe(m.channel);
+        expect(act.payload.permissionOverwrites.some((ow: any) => ow.id === m.role)).toBe(true);
+      }
+    });
+
+    test('12m: Enforces safe ordering (KosmoBot -> Founder -> Team -> Mod -> target role -> @everyone) on generated role-gated permission templates', async () => {
+      const mockPlan = JSON.stringify({
+        planName: 'Setup legal-and-policy',
+        actions: [
+          {
+            type: 'applyPermissionTemplate',
+            payload: {
+              targetName: '1545692538780778587',
+              permissionOverwrites: [
+                { id: '@everyone', deny: ['ViewChannel'] },
+                { id: 'Law & Compliance', allow: ['ViewChannel', 'SendMessages'] },
+                { id: 'Kosmo Founder', allow: ['ViewChannel', 'SendMessages'] },
+                { id: 'Team Kosmo', allow: ['ViewChannel', 'SendMessages'] },
+                { id: 'Moderator', allow: ['ViewChannel', 'SendMessages'] },
+                { id: 'KosmoBot', allow: ['ViewChannel', 'SendMessages'] },
+              ],
+            },
+          },
+        ],
+      });
+
+      const manager = new NLManager(jest.fn().mockResolvedValue(mockPlan));
+      const result = await manager.generatePlan('Configure legal-and-policy', authorizedContext);
+
+      expect(result.success).toBe(true);
+      const act: any = result.plan?.actions[0];
+      expect(act.type).toBe('applyPermissionTemplate');
+      const overwrites = act.payload.permissionOverwrites;
+
+      // Assert exact safe ordering
+      expect(overwrites[0].id).toBe('KosmoBot');
+      expect(overwrites[1].id).toBe('Kosmo Founder');
+      expect(overwrites[2].id).toBe('Team Kosmo');
+      expect(overwrites[3].id).toBe('Moderator');
+      expect(overwrites[4].id).toBe('Law & Compliance');
+      expect(overwrites[5].id).toBe('@everyone');
+    });
+  });
 });

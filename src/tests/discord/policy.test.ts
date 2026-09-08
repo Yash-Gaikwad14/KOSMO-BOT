@@ -13,9 +13,12 @@ import {
 
 describe('Phase 3C Human Authorization Model (Policy Layer)', () => {
   const founder = ['111111111111111111'];
+  const liveFounder = ['1544750811207442532'];
   const teamKosmo = ['222222222222222222'];
+  const liveTeamKosmo = ['1544801399068434443'];
   const admin = ['333333333333333333'];
   const moderator = ['444444444444444444'];
+  const liveModerator = ['1545398110359126066'];
   const unknown = ['999999999999999999'];
   const empty: string[] = [];
 
@@ -70,6 +73,18 @@ describe('Phase 3C Human Authorization Model (Policy Layer)', () => {
       expect(getAuthLevel(founder)).toBe(AuthLevel.FOUNDER);
     });
 
+    test('"Kosmo Founder" role name resolves to FOUNDER AuthLevel', () => {
+      expect(getAuthLevel(['Kosmo Founder'])).toBe(AuthLevel.FOUNDER);
+    });
+
+    test('"kosmo founder" case-insensitive role name resolves to FOUNDER AuthLevel', () => {
+      expect(getAuthLevel(['kosmo founder'])).toBe(AuthLevel.FOUNDER);
+    });
+
+    test('live Founder role ID resolves to FOUNDER AuthLevel', () => {
+      expect(getAuthLevel(liveFounder)).toBe(AuthLevel.FOUNDER);
+    });
+
     test('Founder is allowed for normal management categories', () => {
       expect(authorize(founder, Category.AUDIT)).toBe('ALLOW');
       expect(authorize(founder, Category.MANAGE)).toBe('ALLOW');
@@ -89,6 +104,10 @@ describe('Phase 3C Human Authorization Model (Policy Layer)', () => {
   describe('Team Kosmo Authorization', () => {
     test('Team Kosmo resolves to TEAM_KOSMO AuthLevel', () => {
       expect(getAuthLevel(teamKosmo)).toBe(AuthLevel.TEAM_KOSMO);
+    });
+
+    test('live Team Kosmo role ID resolves to TEAM_KOSMO AuthLevel', () => {
+      expect(getAuthLevel(liveTeamKosmo)).toBe(AuthLevel.TEAM_KOSMO);
     });
 
     test('Team Kosmo is allowed for all management categories', () => {
@@ -131,6 +150,10 @@ describe('Phase 3C Human Authorization Model (Policy Layer)', () => {
   describe('Moderator Authorization', () => {
     test('Moderator resolves to MODERATOR AuthLevel', () => {
       expect(getAuthLevel(moderator)).toBe(AuthLevel.MODERATOR);
+    });
+
+    test('live Moderator role ID resolves to MODERATOR AuthLevel', () => {
+      expect(getAuthLevel(liveModerator)).toBe(AuthLevel.MODERATOR);
     });
 
     test('Moderator is allowed for read-only audit', () => {

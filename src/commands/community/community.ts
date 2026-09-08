@@ -5,7 +5,14 @@ import {
   ChannelType,
   Guild,
   GuildBasedChannel,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ButtonInteraction,
 } from 'discord.js';
+import { summarizerService } from '../../services/ai/summarizerService';
+import { proposalService, CommunityProposalService } from '../../services/ai/proposalService';
+import { extractUserRoleIds, getAuthLevel, AuthLevel, authorize, Category } from '../../services/discord/policy';
 
 export type GuideTopic =
   | 'general'
@@ -74,6 +81,65 @@ export const data = new SlashCommandBuilder()
     subcommand
       .setName('start')
       .setDescription('Get started in this community with essential landmarks and channels')
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName('summarize')
+      .setDescription('Summarize recent community discussion activity (Staff only)')
+      .addChannelOption((option) =>
+        option
+          .setName('channel')
+          .setDescription('Specific public community channel to summarize (defaults to discussion channels)')
+          .setRequired(false)
+      )
+      .addStringOption((option) =>
+        option
+          .setName('scope')
+          .setDescription('Scope of summarization')
+          .setRequired(false)
+          .addChoices(
+            { name: 'Current Channel', value: 'channel' },
+            { name: 'All Public Discussion Channels', value: 'community' }
+          )
+      )
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName('propose')
+      .setDescription('Generate an actionable community infrastructure proposal based on diagnostics (Staff only)')
+      .addStringOption((option) =>
+        option
+          .setName('scope')
+          .setDescription('Scope of diagnostics to analyze')
+          .setRequired(true)
+          .addChoices(
+            { name: 'Entire Community', value: 'COMMUNITY' },
+            { name: 'Specific Channel', value: 'CHANNEL' }
+          )
+      )
+      .addChannelOption((option) =>
+        option
+          .setName('channel')
+          .setDescription('Specific channel to analyze (required if scope is CHANNEL)')
+          .setRequired(false)
+      )
+      .addStringOption((option) =>
+        option
+          .setName('focus')
+          .setDescription('Optimization focus')
+          .setRequired(false)
+          .addChoices(
+            { name: 'Engagement', value: 'engagement' },
+            { name: 'Structure', value: 'structure' },
+            { name: 'Navigation', value: 'navigation' },
+            { name: 'Roles', value: 'roles' }
+          )
+      )
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName('plan-status')
+      .setDescription('View pending community action proposals and expiration status (Staff only)')
   );
 
 /**
@@ -650,6 +716,333 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
         break;
       }
 
+      case 'summarize': {
+        // 1. Authorization: Only Staff (Owner, Founder, Team Kosmo, Admin, Moderator)
+        const callerRoles = extractUserRoleIds(interaction.member);
+        const authLevel = getAuthLevel(callerRoles, {
+          userId: interaction.user.id,
+          guildOwnerId: guild.ownerId,
+        });
+
+        const isStaff =
+          authLevel === AuthLevel.OWNER ||
+          authLevel === AuthLevel.FOUNDER ||
+          authLevel === AuthLevel.TEAM_KOSMO ||
+          authLevel === AuthLevel.ADMIN ||
+          authLevel === AuthLevel.MODERATOR;
+
+        if (!isStaff) {
+          const unauthorizedEmbed = new EmbedBuilder()
+            .setTitle('❌ Unauthorized')
+            .setColor(0xed4245)
+            .setDescription('You do not have permission to use the community summarization command.')
+            .setFooter({ text: 'Access restricted to Kosmo Staff and Moderators.' })
+            .setTimestamp();
+
+          if (interaction.replied || interaction.deferred) {
+            await interaction.followUp({ embeds: [unauthorizedEmbed], ephemeral: true });
+          } else {
+            await interaction.reply({ embeds: [unauthorizedEmbed], ephemeral: true });
+          }
+          return;
+        }
+
+        // Ephemeral defer
+        if (!interaction.deferred && !interaction.replied) {
+          await interaction.deferReply({ ephemeral: true });
+        }
+
+        const targetChannel = interaction.options.getChannel('channel');
+        const scopeChoice = interaction.options.getString('scope');
+
+        const scope = targetChannel || scopeChoice === 'channel' ? 'CHANNEL' : 'COMMUNITY';
+        const channelId = targetChannel?.id || (scope === 'CHANNEL' ? interaction.channelId : undefined);
+
+        const result = await summarizerService.summarize({
+          guild,
+          scope,
+          channelId,
+          requester: {
+            id: interaction.user.id,
+            username: interaction.user.tag || interaction.user.username,
+            authLevel,
+          },
+        });
+
+        if (result.status === 'ERROR' || result.status === 'UNAVAILABLE' || result.status === 'FORBIDDEN') {
+          const errorEmbed = new EmbedBuilder()
+            .setTitle('❌ Community Summary Unavailable')
+            .setColor(0xed4245)
+            .setDescription(result.errorReason || 'An error occurred while generating the community summary.')
+            .setFooter({ text: 'Advisory Intelligence • Read-Only' })
+            .setTimestamp();
+
+          await interaction.followUp({ embeds: [errorEmbed], ephemeral: true });
+          return;
+        }
+
+        if (result.status === 'NO_DATA') {
+          const noDataEmbed = new EmbedBuilder()
+            .setTitle('ℹ️ No Recent Activity Found')
+            .setColor(0x3498db)
+            .setDescription(
+              result.errorReason ||
+                'No recent message activity was found in the specified public community channels.'
+            )
+            .setFooter({ text: 'Advisory Intelligence • Read-Only' })
+            .setTimestamp();
+
+          await interaction.followUp({ embeds: [noDataEmbed], ephemeral: true });
+          return;
+        }
+
+        // Render structured summary
+        const summary = result.summary!;
+        const color = result.status === 'SUCCESS' ? 0x5865f2 : 0xf1c40f;
+
+        const summaryEmbed = new EmbedBuilder()
+          .setTitle('📋 Community Intelligence — Summary')
+          .setColor(color)
+          .setDescription(`### ${summary.headline}\n\n${summary.overview}`)
+          .setTimestamp();
+
+        if (summary.keyTopics.length > 0) {
+          const topicsText = summary.keyTopics
+            .map((t) => `• **${t.topic}**: ${t.description}`)
+            .join('\n');
+          summaryEmbed.addFields({
+            name: '📌 Key Discussion Topics',
+            value: topicsText.length > 1024 ? topicsText.slice(0, 1020) + '...' : topicsText,
+            inline: false,
+          });
+        }
+
+        if (summary.highlightsByChannel.length > 0) {
+          for (const ch of summary.highlightsByChannel.slice(0, 5)) {
+            const pointsText = ch.points.map((p) => `• ${p}`).join('\n') || 'Activity recorded.';
+            summaryEmbed.addFields({
+              name: `#${ch.channelName}`,
+              value: pointsText.length > 1024 ? pointsText.slice(0, 1020) + '...' : pointsText,
+              inline: false,
+            });
+          }
+        }
+
+        if (summary.toneObservation) {
+          summaryEmbed.addFields({
+            name: '💬 Discussion Style',
+            value: summary.toneObservation,
+            inline: false,
+          });
+        }
+
+        const provenance = summary.provenance;
+        const channelList =
+          provenance.channelsSummarized.map((c) => `#${c}`).join(', ') || 'None';
+        const truncatedNote = provenance.truncated
+          ? '⚠️ Context truncated at 12,000 character limit'
+          : 'Complete';
+
+        summaryEmbed.addFields({
+          name: '🔍 Scope & Provenance',
+          value:
+            `**Channels Analyzed**: ${channelList}\n` +
+            `**Volume**: ${provenance.totalMessagesAnalyzed} messages from ${provenance.totalUniqueAuthors} unique members\n` +
+            `**Context Status**: ${truncatedNote}\n` +
+            `**Execution Time**: ${result.executionTimeMs}ms`,
+          inline: false,
+        });
+
+        if (provenance.excludedChannels.length > 0) {
+          summaryEmbed.addFields({
+            name: '🛡️ Excluded Channels',
+            value: provenance.excludedChannels.map((c) => `#${c}`).join(', '),
+            inline: true,
+          });
+        }
+
+        if (provenance.partialErrors.length > 0) {
+          summaryEmbed.addFields({
+            name: '⚠️ Channel Warnings',
+            value: provenance.partialErrors.join('\n').slice(0, 1024),
+            inline: false,
+          });
+        }
+
+        summaryEmbed.setFooter({
+          text: 'Advisory Intelligence • Powered by Kosmo AI • Read-Only',
+        });
+
+        await interaction.followUp({ embeds: [summaryEmbed], ephemeral: true });
+        break;
+      }
+
+      case 'propose': {
+        if (!interaction.guild) {
+          await interaction.reply({
+            content: '❌ Community proposals can only be generated within a server.',
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const userRoleIds = extractUserRoleIds(interaction.member);
+        const authLevel = getAuthLevel(userRoleIds, {
+          userId: interaction.user.id,
+          guildOwnerId: interaction.guild.ownerId,
+        });
+
+        if (authLevel === AuthLevel.NONE) {
+          await interaction.reply({
+            content: '❌ You do not have permission to propose community actions. Requires staff authorization (Moderator+).',
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const scope = interaction.options.getString('scope', true) as 'COMMUNITY' | 'CHANNEL';
+        const targetChannel = interaction.options.getChannel('channel');
+        const focus = (interaction.options.getString('focus') as any) || undefined;
+
+        if (scope === 'CHANNEL' && !targetChannel) {
+          await interaction.reply({
+            content: '❌ A target channel must be specified when scope is "Specific Channel".',
+            ephemeral: true,
+          });
+          return;
+        }
+
+        await interaction.deferReply({ ephemeral: true });
+
+        const result = await proposalService.generateProposal({
+          guild: interaction.guild,
+          scope,
+          channelId: targetChannel?.id,
+          focus,
+          creator: {
+            userId: interaction.user.id,
+            username: interaction.user.tag || interaction.user.username,
+            authLevel,
+          },
+        });
+
+        if (!result.success || !result.proposal) {
+          const errorEmbed = new EmbedBuilder()
+            .setTitle('❌ Proposal Creation Rejected')
+            .setColor(0xed4245)
+            .setDescription(result.message || 'Unable to generate community action proposal.')
+            .setFooter({ text: 'Community Advisory • Fail Closed' })
+            .setTimestamp();
+
+          await interaction.followUp({ embeds: [errorEmbed], ephemeral: true });
+          return;
+        }
+
+        const proposal = result.proposal;
+        const isHighRisk = proposal.actionRisk === 'HIGH';
+
+        const embed = new EmbedBuilder()
+          .setTitle('📋 Community Action Proposal (Phase 9.8)')
+          .setColor(isHighRisk ? 0xed4245 : 0x5865f2)
+          .setDescription(`### Rationale\n${proposal.rationale}\n\n*This proposal was generated by AI from community diagnostics. No mutations have been performed.*`)
+          .addFields(
+            { name: 'Proposal ID', value: `\`${proposal.planId}\``, inline: true },
+            { name: 'Risk Level', value: `\`${proposal.actionRisk}\``, inline: true },
+            { name: 'Status', value: `\`${proposal.status}\``, inline: true },
+            {
+              name: `Proposed Actions (${proposal.actions.length})`,
+              value: proposal.actions
+                .map((a, idx) => `${idx + 1}. **${a.type}**: \`${JSON.stringify(a.payload)}\``)
+                .join('\n')
+                .slice(0, 1024),
+              inline: false,
+            },
+            {
+              name: 'Expiration',
+              value: `<t:${Math.floor(proposal.expiration.getTime() / 1000)}:R>`,
+              inline: true,
+            },
+            {
+              name: 'Required Authority',
+              value: isHighRisk
+                ? 'Founder, Team Kosmo, or Server Owner'
+                : 'Staff (Moderator, Admin, Founder)',
+              inline: true,
+            }
+          )
+          .setFooter({ text: 'Awaiting human confirmation • Zero mutations performed' })
+          .setTimestamp();
+
+        const confirmBtn = new ButtonBuilder()
+          .setCustomId(`community_confirm_${proposal.planId}`)
+          .setLabel('Confirm Proposal')
+          .setStyle(isHighRisk ? ButtonStyle.Danger : ButtonStyle.Primary);
+
+        const cancelBtn = new ButtonBuilder()
+          .setCustomId(`community_cancel_${proposal.planId}`)
+          .setLabel('Cancel')
+          .setStyle(ButtonStyle.Secondary);
+
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(confirmBtn, cancelBtn);
+
+        await interaction.followUp({
+          embeds: [embed],
+          components: [row],
+          ephemeral: true,
+        });
+        break;
+      }
+
+      case 'plan-status': {
+        if (!interaction.guild) {
+          await interaction.reply({
+            content: '❌ Proposal status can only be viewed within a server.',
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const userRoleIds = extractUserRoleIds(interaction.member);
+        const authLevel = getAuthLevel(userRoleIds, {
+          userId: interaction.user.id,
+          guildOwnerId: interaction.guild.ownerId,
+        });
+
+        if (authLevel === AuthLevel.NONE) {
+          await interaction.reply({
+            content: '❌ You do not have permission to view community proposals.',
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const pending = await proposalService.getPendingProposalsForGuild(interaction.guild.id);
+        if (pending.length === 0) {
+          await interaction.reply({
+            content: 'ℹ️ No pending community action proposals for this server.',
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const embed = new EmbedBuilder()
+          .setTitle('📋 Pending Community Action Proposals')
+          .setColor(0x3498db)
+          .setDescription(`Active pending proposals (${pending.length}/${CommunityProposalService.MAX_PENDING_PROPOSALS}):`)
+          .setTimestamp();
+
+        for (const p of pending) {
+          embed.addFields({
+            name: `Proposal \`${p.planId}\` (${p.actionRisk})`,
+            value: `• **Creator**: <@${p.creator.userId}>\n• **Actions**: ${p.actions.length}\n• **Expires**: <t:${Math.floor(p.expiration.getTime() / 1000)}:R>\n• **Rationale**: ${p.rationale.slice(0, 120)}...`,
+            inline: false,
+          });
+        }
+
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+        break;
+      }
+
       default: {
         if (interaction.replied || interaction.deferred) {
           await interaction.followUp({
@@ -672,6 +1065,141 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     } else {
       await interaction.reply({ content: `❌ Error: ${errorMessage}`, ephemeral: true });
     }
+  }
+}
+
+/**
+ * Button interaction handler for Phase 9.8 Community Proposal [Confirm Proposal] and [Cancel] buttons.
+ */
+export async function handleProposalButton(interaction: ButtonInteraction): Promise<void> {
+  const customId = interaction.customId;
+  const isConfirm = customId.startsWith('community_confirm_');
+  const isCancel = customId.startsWith('community_cancel_');
+
+  if (!isConfirm && !isCancel) return;
+  if (interaction.replied || interaction.deferred) return;
+
+  const planId = isConfirm
+    ? customId.replace('community_confirm_', '')
+    : customId.replace('community_cancel_', '');
+
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: '❌ Confirmation can only be performed within a server.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const userRoleIds = extractUserRoleIds(interaction.member);
+  const context = {
+    userId: interaction.user.id,
+    guildOwnerId: interaction.guild.ownerId,
+  };
+
+  if (isCancel) {
+    const cancelRes = await proposalService.cancelProposal(planId, interaction.user.id, interaction.guild.id);
+    if (!cancelRes.success) {
+      await interaction.reply({ content: `❌ ${cancelRes.message}`, ephemeral: true });
+      return;
+    }
+
+    const cancelEmbed = new EmbedBuilder()
+      .setTitle('🚫 Community Proposal Cancelled')
+      .setDescription('The action proposal was cancelled. No changes were made to Discord.')
+      .setColor(0x95a5a6)
+      .setFooter({ text: `Cancelled by @${interaction.user.username}` })
+      .setTimestamp();
+
+    await interaction.update({ embeds: [cancelEmbed], components: [] });
+    return;
+  }
+
+  // isConfirm branch
+  const proposal = await proposalService.getProposal(planId);
+  if (!proposal) {
+    await interaction.reply({ content: `❌ Proposal "${planId}" not found or expired.`, ephemeral: true });
+    return;
+  }
+
+  if (proposal.status !== 'PENDING') {
+    await interaction.reply({
+      content: `❌ Proposal "${planId}" is ${proposal.status.toLowerCase()} and cannot be confirmed.`,
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // Authorize
+  const decision = authorize(userRoleIds, Category.CONFIRM, context);
+  if (decision === 'DENY') {
+    await interaction.reply({ content: '❌ You are not authorized to confirm this action.', ephemeral: true });
+    return;
+  }
+
+  if (decision === 'REQUIRES_FOUNDERS_APPROVAL') {
+    await interaction.reply({
+      content: '⚠️ Confirmation requires Founder, Team Kosmo, or Server Owner approval.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // Defer update
+  if (typeof (interaction as any).deferUpdate === 'function') {
+    await interaction.deferUpdate();
+  }
+
+  const execRes = await proposalService.confirmAndExecuteProposal(
+    interaction.guild,
+    planId,
+    userRoleIds,
+    context
+  );
+
+  if (!execRes.success) {
+    const errorEmbed = new EmbedBuilder()
+      .setTitle(`❌ Proposal Execution ${execRes.status === 'PARTIALLY_FAILED' ? 'Partially Failed' : 'Failed'}`)
+      .setDescription(`**Status:** \`${execRes.status}\`\n\n${execRes.message}`)
+      .setColor(0xed4245)
+      .setTimestamp();
+
+    if (execRes.executionResults && execRes.executionResults.length > 0) {
+      errorEmbed.addFields({
+        name: 'Executed Prior to Failure',
+        value: execRes.executionResults.map((r, i) => `${i + 1}. ${r}`).join('\n').slice(0, 1024),
+        inline: false,
+      });
+    }
+
+    if (interaction.deferred && typeof (interaction as any).editReply === 'function') {
+      await interaction.editReply({ embeds: [errorEmbed], components: [] });
+    } else {
+      await interaction.update({ embeds: [errorEmbed], components: [] });
+    }
+    return;
+  }
+
+  const successEmbed = new EmbedBuilder()
+    .setTitle('✅ Community Action Proposal Executed & Verified')
+    .setDescription(`**Proposal ID:** \`${planId}\`\nAll proposed actions have been executed and verified in Discord state.`)
+    .setColor(0x57f287)
+    .addFields(
+      { name: 'Status', value: '`VERIFIED`', inline: true },
+      { name: 'Confirmed By', value: `<@${interaction.user.id}>`, inline: true },
+      {
+        name: 'Execution Results',
+        value: execRes.executionResults?.map((r, i) => `${i + 1}. ${r}`).join('\n').slice(0, 1024) || 'All actions succeeded.',
+        inline: false,
+      }
+    )
+    .setFooter({ text: 'Community Advisory • Verified Execution' })
+    .setTimestamp();
+
+  if (interaction.deferred && typeof (interaction as any).editReply === 'function') {
+    await interaction.editReply({ embeds: [successEmbed], components: [] });
+  } else {
+    await interaction.update({ embeds: [successEmbed], components: [] });
   }
 }
 

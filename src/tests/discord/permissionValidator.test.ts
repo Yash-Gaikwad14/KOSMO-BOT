@@ -143,4 +143,83 @@ describe('PermissionValidator Safety Constraints', () => {
     expect(res.blockedReasons?.[0]).toMatch(/privileged role/i);
     expect(() => validateAction(mockGuild, action)).toThrow(/privileged role/i);
   });
+
+  // Permission template targetName validation tests
+  describe('applyPermissionTemplate targetName validation', () => {
+    test('rejects targetName that resolves to a role name', () => {
+      const roleNames = [
+        'Tech & Engineering',
+        'Business & Strategy',
+        'Academia & Education',
+        'Law & Compliance',
+        'Creative & Design',
+        'Founder',
+        'Team Kosmo',
+        'Moderator',
+      ];
+
+      for (const roleName of roleNames) {
+        const action: DiscordAction = {
+          type: 'applyPermissionTemplate',
+          payload: {
+            targetName: roleName,
+            permissionOverwrites: [{ id: '@everyone', deny: ['ViewChannel'] }],
+          },
+        };
+        const res = PermissionValidator.validateAction(action);
+        expect(res.valid).toBe(false);
+        expect(res.blocked).toBe(true);
+        expect(res.blockedReasons?.[0]).toMatch(/is a role name/i);
+      }
+    });
+
+    test('rejects role-derived slugs that are not channel targets (e.g. academia-and-education)', () => {
+      const invalidRoleSlugs = [
+        'academia-and-education',
+        'law-and-compliance',
+        'creative-and-design',
+        'kosmo-founder',
+        'team-kosmo',
+      ];
+
+      for (const slug of invalidRoleSlugs) {
+        const action: DiscordAction = {
+          type: 'applyPermissionTemplate',
+          payload: {
+            targetName: slug,
+            permissionOverwrites: [{ id: '@everyone', deny: ['ViewChannel'] }],
+          },
+        };
+        const res = PermissionValidator.validateAction(action);
+        expect(res.valid).toBe(false);
+        expect(res.blocked).toBe(true);
+        expect(res.blockedReasons?.[0]).toMatch(/is a role name/i);
+      }
+    });
+
+    test('allows valid Guild Discussion channel targets', () => {
+      const validChannels = [
+        'tech-and-engineering',
+        'business-and-strategy',
+        'academia-and-research',
+        'legal-and-policy',
+        'creatives-lounge',
+        '#tech-and-engineering',
+        '#academia-and-research',
+      ];
+
+      for (const chan of validChannels) {
+        const action: DiscordAction = {
+          type: 'applyPermissionTemplate',
+          payload: {
+            targetName: chan,
+            permissionOverwrites: [{ id: '@everyone', deny: ['ViewChannel'] }],
+          },
+        };
+        const res = PermissionValidator.validateAction(action);
+        expect(res.valid).toBe(true);
+        expect(res.blocked).toBe(false);
+      }
+    });
+  });
 });

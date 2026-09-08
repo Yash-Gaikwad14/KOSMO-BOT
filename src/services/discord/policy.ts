@@ -96,9 +96,11 @@ function hasLogicalRole(userRoleIds: string[], logical: LogicalRole): boolean {
   const ids = roleConfig[logical] ?? [];
   return userRoleIds.some((idOrName) => {
     if (ids.includes(idOrName)) return true;
+    const lower = idOrName.toLowerCase();
     // Also match logical role name case-insensitively for backward compatibility with mock tests
-    if (idOrName.toLowerCase() === logical.toLowerCase()) return true;
-    if (logical === LogicalRole.Admin && idOrName.toLowerCase() === 'administrator') return true;
+    if (lower === logical.toLowerCase()) return true;
+    if (logical === LogicalRole.Founder && lower === 'kosmo founder') return true;
+    if (logical === LogicalRole.Admin && lower === 'administrator') return true;
     return false;
   });
 }
@@ -234,25 +236,27 @@ export function getLogicalRoles(userRoleIds: string[]): LogicalRole[] {
  * Extracts an array of string role IDs from a Discord GuildMember, APIGuildMember,
  * or mock member object.
  */
-export function extractUserRoleIds(member: any): string[] {
+export function extractUserRoleIds(member: unknown): string[] {
   const userRoleIds: string[] = [];
-  if (member && 'roles' in member) {
-    const memberRoles = member.roles;
+  if (member && typeof member === 'object' && 'roles' in member) {
+    const memberRoles = (member as { roles?: unknown }).roles;
     if (Array.isArray(memberRoles)) {
-      memberRoles.forEach((r: any) => {
+      memberRoles.forEach((r: unknown) => {
         if (r && typeof r === 'object') {
-          if (r.id) userRoleIds.push(String(r.id));
-          if (r.name && r.name !== r.id) userRoleIds.push(String(r.name));
+          const roleObj = r as { id?: unknown; name?: unknown };
+          if (roleObj.id) userRoleIds.push(String(roleObj.id));
+          if (roleObj.name && roleObj.name !== roleObj.id) userRoleIds.push(String(roleObj.name));
         } else if (r) {
           userRoleIds.push(String(r));
         }
       });
-    } else if (typeof memberRoles === 'object' && 'cache' in memberRoles) {
-      const cache = (memberRoles as any).cache;
-      const extract = (r: any) => {
+    } else if (memberRoles && typeof memberRoles === 'object' && 'cache' in memberRoles) {
+      const cache = (memberRoles as { cache?: { forEach?: (fn: (r: unknown) => void) => void; values?: () => Iterable<unknown> } }).cache;
+      const extract = (r: unknown) => {
         if (r && typeof r === 'object') {
-          if (r.id) userRoleIds.push(String(r.id));
-          if (r.name && r.name !== r.id) userRoleIds.push(String(r.name));
+          const roleObj = r as { id?: unknown; name?: unknown };
+          if (roleObj.id) userRoleIds.push(String(roleObj.id));
+          if (roleObj.name && roleObj.name !== roleObj.id) userRoleIds.push(String(roleObj.name));
         } else if (r) {
           userRoleIds.push(String(r));
         }
@@ -269,6 +273,7 @@ export function extractUserRoleIds(member: any): string[] {
 
 export const ALLOWED_MANAGEMENT_ROLES = [
   'founder',
+  'kosmo founder',
   'team kosmo',
   'admin',
   'administrator',
@@ -299,18 +304,6 @@ export class PolicyService implements IPolicyService {
 
     const level = getAuthLevel(context.roles || [], authContext);
     const decision = evaluatePolicy(level, Category.MANAGE);
-
-    console.log(`[AUTH DEBUG]
-user=${context.username}
-userId=${context.userId}
-guildId=${context.guildId ?? 'unknown'}
-guildOwnerId=${context.guildOwnerId ?? 'unknown'}
-roleIds=${JSON.stringify(context.roles || [])}
-founderRoleConfigured=${JSON.stringify(roleConfig[LogicalRole.Founder] ?? [])}
-teamKosmoRoleConfigured=${JSON.stringify(roleConfig[LogicalRole.TeamKosmo] ?? [])}
-resolvedAuthLevel=${level}
-category=MANAGE
-decision=${decision}`);
 
     return decision === 'ALLOW';
   }

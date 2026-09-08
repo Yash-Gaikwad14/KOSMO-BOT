@@ -81,7 +81,18 @@ export type DiscordAction =
 
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' | 'BLOCKED';
 
-export type PlanStatus = 'PROPOSED' | 'CONFIRMED' | 'EXECUTED' | 'REJECTED' | 'CANCELLED';
+export type PlanStatus =
+  | 'PROPOSED'
+  | 'PENDING'
+  | 'CONFIRMED'
+  | 'EXECUTING'
+  | 'EXECUTED'
+  | 'VERIFIED'
+  | 'PARTIALLY_FAILED'
+  | 'FAILED'
+  | 'EXPIRED'
+  | 'REJECTED'
+  | 'CANCELLED';
 
 export interface Plan {
   id: string;
@@ -93,6 +104,10 @@ export interface Plan {
   status: PlanStatus;
   createdAt: Date;
   createdBy?: string;
+  guildId?: string;
+  expiresAt?: Date;
+  executionResults?: string[];
+  failedActionIndex?: number;
 }
 
 export interface ValidationResult {

@@ -52,8 +52,29 @@ export async function confirmAndExecutePlan(
     };
   }
 
+  // Guild binding check if plan specifies a guild
+  if (plan.guildId && plan.guildId !== guild.id) {
+    return {
+      success: false,
+      status: 'REJECTED',
+      plan,
+      message: 'Plan does not belong to this server.',
+    };
+  }
+
+  // Expiration check
+  if (plan.expiresAt && Date.now() > plan.expiresAt.getTime()) {
+    plan.status = 'EXPIRED';
+    return {
+      success: false,
+      status: 'EXPIRED',
+      plan,
+      message: `Plan "${planId}" has expired.`,
+    };
+  }
+
   // Lifecycle check: prevent duplicate or stale executions
-  if (plan.status === 'EXECUTED') {
+  if (plan.status === 'EXECUTED' || plan.status === 'VERIFIED') {
     return {
       success: false,
       status: 'EXECUTED',
@@ -71,7 +92,7 @@ export async function confirmAndExecutePlan(
     };
   }
 
-  if (plan.status !== 'PROPOSED') {
+  if (plan.status !== 'PROPOSED' && plan.status !== 'PENDING') {
     return {
       success: false,
       status: plan.status,
@@ -85,10 +106,10 @@ export async function confirmAndExecutePlan(
   const decision = authorize(userRoleIds, Category.CONFIRM, context);
 
   if (decision === 'DENY') {
-    // Unauthorized confirmation: plan remains PROPOSED
+    // Unauthorized confirmation: plan remains in its current pending status
     return {
       success: false,
-      status: 'PROPOSED',
+      status: plan.status,
       plan,
       unauthorized: true,
       message: 'You are not authorized to confirm this action.',
@@ -96,10 +117,10 @@ export async function confirmAndExecutePlan(
   }
 
   if (decision === 'REQUIRES_FOUNDERS_APPROVAL') {
-    // Admin or role requiring founder approval: plan remains PROPOSED
+    // Admin or role requiring founder approval: plan remains in pending status
     return {
       success: false,
-      status: 'PROPOSED',
+      status: plan.status,
       plan,
       requiresFounderApproval: true,
       message: 'Confirmation requires Founder or Team Kosmo approval.',
@@ -122,16 +143,34 @@ export async function confirmAndExecutePlan(
     };
   }
 
-  // 5. Deterministic Discord execution via runAction()
+  // 5. Deterministic, sequential Discord execution via runAction()
+  // Non-atomic: halts immediately on first failure without blind rollback
   const executionResults: string[] = [];
   try {
-    for (const action of plan.actions) {
-      const res = await runAction(guild, action);
-      executionResults.push(res);
+    for (let i = 0; i < plan.actions.length; i++) {
+      const action = plan.actions[i];
+      try {
+        const res = await runAction(guild, action);
+        executionResults.push(res);
+      } catch (actionErr) {
+        const isPartial = i > 0;
+        plan.status = (isPartial ? 'PARTIALLY_FAILED' : 'FAILED') as PlanStatus;
+        plan.executionResults = executionResults;
+        plan.failedActionIndex = i;
+        const errDetail = actionErr instanceof Error ? actionErr.message : String(actionErr);
+        return {
+          success: false,
+          status: plan.status,
+          plan,
+          message: `Execution failed at action ${i + 1}: ${errDetail}`,
+          executionResults,
+        };
+      }
     }
 
     // 6. Transition to EXECUTED upon completion
     plan.status = 'EXECUTED';
+    plan.executionResults = executionResults;
     return {
       success: true,
       status: 'EXECUTED',
@@ -141,7 +180,6 @@ export async function confirmAndExecutePlan(
     };
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    // Do NOT falsely mark plan EXECUTED on failure
     return {
       success: false,
       status: 'CONFIRMED',

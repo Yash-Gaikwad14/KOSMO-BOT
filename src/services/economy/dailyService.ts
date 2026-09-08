@@ -13,6 +13,8 @@ import {
   IUnbelievaBoatClient,
   defaultUnbelievaBoatClient,
 } from './unbelievaboatClient';
+import { cache, redisKeys, REDIS_TTL } from '../cache';
+import { getDailyClaimRepository } from '../database/dailyClaimRepository';
 
 export const DAILY_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
 export const SPARKS_NORMAL = 500;
@@ -34,7 +36,7 @@ export interface CooldownEntry {
   totalClaims: number;
 }
 
-// In-memory cooldown store keyed by userId
+// In-memory test mirror keyed by userId for fast synchronous check & offline test suites
 const dailyCooldowns = new Map<string, CooldownEntry>();
 
 /**
@@ -68,7 +70,7 @@ export function formatRemainingTime(ms: number): string {
 }
 
 /**
- * Checks user cooldown status without performing mutations.
+ * Synchronous check of user cooldown status from memory mirror.
  */
 export function checkDailyEligibility(userId: string): {
   eligible: boolean;
@@ -92,12 +94,58 @@ export function checkDailyEligibility(userId: string): {
 }
 
 /**
- * Executes a daily claim for a user.
+ * Asynchronous check of user cooldown status querying Redis speed layer and PostgreSQL fallback.
+ */
+export async function checkDailyEligibilityAsync(userId: string): Promise<{
+  eligible: boolean;
+  remainingMs: number;
+  nextClaimAt?: Date;
+}> {
+  const redisCooldownKey = redisKeys.dailyCooldown(userId);
+  const cachedTimeStr = await cache.get<string>(redisCooldownKey);
+  let lastClaimTime: Date | null = cachedTimeStr ? new Date(cachedTimeStr) : null;
+
+  if (!lastClaimTime) {
+    try {
+      const dbClaim = await getDailyClaimRepository().getLastClaim(userId);
+      if (dbClaim && Date.now() - dbClaim.claimedAt.getTime() < DAILY_COOLDOWN_MS) {
+        lastClaimTime = dbClaim.claimedAt;
+        const remainingSec = Math.ceil((DAILY_COOLDOWN_MS - (Date.now() - lastClaimTime.getTime())) / 1000);
+        if (remainingSec > 0) {
+          await cache.set(redisCooldownKey, lastClaimTime.toISOString(), remainingSec);
+        }
+      }
+    } catch {
+      // Non-blocking fallback to local mirror
+    }
+  }
+
+  if (!lastClaimTime) {
+    const localEntry = dailyCooldowns.get(userId);
+    if (localEntry) lastClaimTime = localEntry.lastClaimedAt;
+  }
+
+  if (lastClaimTime) {
+    const elapsed = Date.now() - lastClaimTime.getTime();
+    if (elapsed < DAILY_COOLDOWN_MS) {
+      const remainingMs = DAILY_COOLDOWN_MS - elapsed;
+      const nextClaimAt = new Date(lastClaimTime.getTime() + DAILY_COOLDOWN_MS);
+      return { eligible: false, remainingMs, nextClaimAt };
+    }
+  }
+
+  return { eligible: true, remainingMs: 0 };
+}
+
+/**
+ * Executes a race-safe daily claim for a user.
  *
- * 1. Verifies 24-hour cooldown.
- * 2. Determines High-Karma tier.
- * 3. Coordinates with UnbelievaBoat to grant Sparks.
- * 4. Only records cooldown after verified economy synchronization.
+ * 1. Acquires distributed Redis lock `lock:user:${userId}:daily_claim` (15s TTL) with unique ownership token.
+ * 2. Verifies 24-hour cooldown from Redis speed layer and PostgreSQL recovery ledger.
+ * 3. Coordinates with UnbelievaBoat external economy provider to grant Sparks.
+ * 4. Invariant: Cooldown is NEVER consumed if UnbelievaBoat fails.
+ * 5. On success: sets Redis cooldown key `cooldown:daily:${userId}` (24h TTL) and logs durable PostgreSQL claim.
+ * 6. Safely releases lock via atomic Lua ownership check.
  */
 export async function claimDaily(
   userId: string,
@@ -106,63 +154,134 @@ export async function claimDaily(
   client: IUnbelievaBoatClient = defaultUnbelievaBoatClient
 ): Promise<DailyClaimResult> {
   const isHighKarma = isHighKarmaMember(callerRoleIds);
+  const lockKey = redisKeys.dailyClaimLock(userId);
 
-  // 1. Check Cooldown
-  const eligibility = checkDailyEligibility(userId);
-  if (!eligibility.eligible) {
-    const remainingFormatted = formatRemainingTime(eligibility.remainingMs);
-    const unixNext = Math.floor(eligibility.nextClaimAt!.getTime() / 1000);
-
+  // 1. Acquire Redis distributed lock with unique ownership token
+  const lock = await cache.acquireLock(lockKey, REDIS_TTL.DAILY_CLAIM_LOCK);
+  if (!lock.acquired) {
     return {
       success: false,
       onCooldown: true,
       sparksAwarded: 0,
       isHighKarma,
-      remainingMs: eligibility.remainingMs,
-      nextClaimAt: eligibility.nextClaimAt,
-      message: `You have already claimed your daily Sparks. Come back in **${remainingFormatted}** (available <t:${unixNext}:R>).`,
+      message: 'Your daily Sparks claim is currently being processed. Please wait a moment.',
     };
   }
 
-  // 2. Calculate Sparks Reward
-  const sparksAwarded = isHighKarma ? SPARKS_HIGH_KARMA : SPARKS_NORMAL;
-  const tierDescription = isHighKarma ? 'High-Karma Tier' : 'Standard Tier';
-  const reason = `Kosmo daily Sparks allowance (${tierDescription})`;
+  try {
+    // 2. Check 24-Hour Cooldown from Redis (speed layer)
+    const redisCooldownKey = redisKeys.dailyCooldown(userId);
+    const cachedClaimTimeStr = await cache.get<string>(redisCooldownKey);
+    let lastClaimTime: Date | null = cachedClaimTimeStr ? new Date(cachedClaimTimeStr) : null;
 
-  // 3. Dispatch to UnbelievaBoat External Economy Provider
-  const ubbResponse = await client.grantSparks(guildId, userId, sparksAwarded, reason);
+    // Fail-safe / Restart recovery: If Redis key not found, check PostgreSQL durable claim ledger
+    if (!lastClaimTime) {
+      try {
+        const dbClaim = await getDailyClaimRepository().getLastClaim(userId);
+        if (dbClaim && Date.now() - dbClaim.claimedAt.getTime() < DAILY_COOLDOWN_MS) {
+          lastClaimTime = dbClaim.claimedAt;
+          const remainingSec = Math.ceil((DAILY_COOLDOWN_MS - (Date.now() - lastClaimTime.getTime())) / 1000);
+          if (remainingSec > 0) {
+            await cache.set(redisCooldownKey, lastClaimTime.toISOString(), remainingSec);
+          }
+        }
+      } catch (dbErr) {
+        console.warn('Daily claim PostgreSQL recovery check warning:', dbErr);
+      }
+    }
 
-  if (!ubbResponse.success) {
-    // CRITICAL: Do NOT record cooldown on failure!
+    // Also check in-memory test mirror
+    if (!lastClaimTime) {
+      const localEntry = dailyCooldowns.get(userId);
+      if (localEntry && Date.now() - localEntry.lastClaimedAt.getTime() < DAILY_COOLDOWN_MS) {
+        lastClaimTime = localEntry.lastClaimedAt;
+      }
+    }
+
+    if (lastClaimTime) {
+      const elapsed = Date.now() - lastClaimTime.getTime();
+      if (elapsed < DAILY_COOLDOWN_MS) {
+        const remainingMs = DAILY_COOLDOWN_MS - elapsed;
+        const nextClaimAt = new Date(lastClaimTime.getTime() + DAILY_COOLDOWN_MS);
+        const remainingFormatted = formatRemainingTime(remainingMs);
+        const unixNext = Math.floor(nextClaimAt.getTime() / 1000);
+
+        // Update local memory mirror
+        dailyCooldowns.set(userId, { lastClaimedAt: lastClaimTime, totalClaims: 1 });
+
+        return {
+          success: false,
+          onCooldown: true,
+          sparksAwarded: 0,
+          isHighKarma,
+          remainingMs,
+          nextClaimAt,
+          message: `You have already claimed your daily Sparks. Come back in **${remainingFormatted}** (available <t:${unixNext}:R>).`,
+        };
+      }
+    }
+
+    // 3. Calculate Sparks Reward
+    const sparksAwarded = isHighKarma ? SPARKS_HIGH_KARMA : SPARKS_NORMAL;
+    const tierDescription = isHighKarma ? 'High-Karma Tier' : 'Standard Tier';
+    const reason = `Kosmo daily Sparks allowance (${tierDescription})`;
+
+    // 4. Dispatch to UnbelievaBoat External Economy Provider
+    const ubbResponse = await client.grantSparks(guildId, userId, sparksAwarded, reason);
+
+    if (!ubbResponse.success) {
+      // Invariant: NEVER record cooldown on failure
+      return {
+        success: false,
+        onCooldown: false,
+        sparksAwarded: 0,
+        isHighKarma,
+        error: ubbResponse.error || 'Economy synchronization failed',
+        message: `Encountered an issue crediting Sparks to UnbelievaBoat: ${ubbResponse.error || 'Unknown error'}. Your daily claim was not consumed. Please try again shortly.`,
+      };
+    }
+
+    // 5. Update Cooldown only after verified success
+    const now = new Date();
+    const nextClaimAt = new Date(now.getTime() + DAILY_COOLDOWN_MS);
+
+    // Authoritative Redis speed layer write (24h TTL)
+    await cache.set(redisCooldownKey, now.toISOString(), REDIS_TTL.DAILY_COOLDOWN);
+
+    // Durable PostgreSQL claim ledger write
+    try {
+      await getDailyClaimRepository().recordClaim({
+        userId,
+        guildId,
+        sparksAwarded,
+        isHighKarma,
+        claimedAt: now,
+      });
+    } catch (err) {
+      console.warn('Failed to record daily claim in durable PostgreSQL ledger:', err);
+    }
+
+    // Update in-memory mirror
+    const existing = dailyCooldowns.get(userId);
+    dailyCooldowns.set(userId, {
+      lastClaimedAt: now,
+      totalClaims: (existing?.totalClaims ?? 0) + 1,
+    });
+
     return {
-      success: false,
-      onCooldown: false,
-      sparksAwarded: 0,
+      success: true,
+      sparksAwarded,
       isHighKarma,
-      error: ubbResponse.error || 'Economy synchronization failed',
-      message: `Encountered an issue crediting Sparks to UnbelievaBoat: ${ubbResponse.error || 'Unknown error'}. Your daily claim was not consumed. Please try again shortly.`,
+      nextClaimAt,
+      message: isHighKarma
+        ? `⚡ **Daily Sparks Claimed!**\nAwarded **+${sparksAwarded.toLocaleString()} Sparks** (High-Karma Tier) to <@${userId}>.\nThanks for your active community contributions!`
+        : `🪙 **Daily Sparks Claimed!**\nAwarded **+${sparksAwarded.toLocaleString()} Sparks** (Standard Tier) to <@${userId}>.\n*Tip: Level up your Karma in the server to unlock the **2,000 Sparks/day** High-Karma tier.*`,
     };
+  } finally {
+    if (lock.token) {
+      await cache.releaseLock(lockKey, lock.token);
+    }
   }
-
-  // 4. Update In-Memory Cooldown only after verified success
-  const now = new Date();
-  const existing = dailyCooldowns.get(userId);
-  dailyCooldowns.set(userId, {
-    lastClaimedAt: now,
-    totalClaims: (existing?.totalClaims ?? 0) + 1,
-  });
-
-  const nextClaimAt = new Date(now.getTime() + DAILY_COOLDOWN_MS);
-
-  return {
-    success: true,
-    sparksAwarded,
-    isHighKarma,
-    nextClaimAt,
-    message: isHighKarma
-      ? `⚡ **Daily Sparks Claimed!**\nAwarded **+${sparksAwarded.toLocaleString()} Sparks** (High-Karma Tier) to <@${userId}>.\nThanks for your active community contributions!`
-      : `🪙 **Daily Sparks Claimed!**\nAwarded **+${sparksAwarded.toLocaleString()} Sparks** (Standard Tier) to <@${userId}>.\n*Tip: Level up your Karma in the server to unlock the **2,000 Sparks/day** High-Karma tier.*`,
-  };
 }
 
 /**
@@ -170,6 +289,13 @@ export async function claimDaily(
  */
 export function _resetDailyCooldowns(): void {
   dailyCooldowns.clear();
+  cache.flush().catch(() => {});
+  try {
+    const repo = getDailyClaimRepository();
+    if (repo && typeof repo.clear === 'function') {
+      repo.clear().catch(() => {});
+    }
+  } catch {}
 }
 
 /**
@@ -177,4 +303,18 @@ export function _resetDailyCooldowns(): void {
  */
 export function _setDailyCooldown(userId: string, lastClaimedAt: Date, totalClaims = 1): void {
   dailyCooldowns.set(userId, { lastClaimedAt, totalClaims });
+  const elapsed = Date.now() - lastClaimedAt.getTime();
+  const remainingSec = Math.max(0, Math.ceil((DAILY_COOLDOWN_MS - elapsed) / 1000));
+  if (remainingSec > 0) {
+    cache.set(redisKeys.dailyCooldown(userId), lastClaimedAt.toISOString(), remainingSec).catch(() => {});
+  } else {
+    cache.del(redisKeys.dailyCooldown(userId)).catch(() => {});
+    // If expired, clear any stale claim from the repo for test isolation
+    try {
+      const repo = getDailyClaimRepository();
+      if (repo && typeof repo.clear === 'function') {
+        repo.clear().catch(() => {});
+      }
+    } catch {}
+  }
 }

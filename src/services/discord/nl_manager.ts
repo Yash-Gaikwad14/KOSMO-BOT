@@ -7,6 +7,8 @@ import {
 import { PermissionValidator } from './permissionValidator';
 import { PlanService } from './plan';
 import { policyService, IPolicyService } from './policy';
+import { orderPermissionOverwritesForRoleGating } from './actions';
+import { extractAndParseJSON } from '../ai/jsonParser';
 
 export interface LLMCompletionOptions {
   model?: string;
@@ -71,10 +73,88 @@ Supported Action Types & Payloads:
    - "memberId": concrete Discord member ID string explicitly provided by the user
    - Follows the same Member ID rules as assignRole.
 5. applyPermissionTemplate:
-   - "targetName": concrete channel name string
-   - "permissionOverwrites": array of { "id": concrete target ID, "allow": [], "deny": [] }
+   - "targetName": concrete channel name string.
+     CRITICAL: targetName = resource being modified (existing Discord channel or category, e.g. "tech-and-engineering").
+     CRITICAL: permissionOverwrites.id = role or user receiving the permission overwrite (e.g. "Tech & Engineering").
+     NEVER put a role name, role slug, or role-derived slug in targetName.
+     If the user writes "#channel-name", strip the "#" to use "channel-name".
+
+   APPROVED GUILD DISCUSSION CHANNELS & ROLE MAPPINGS:
+   When configuring, role-gating, or applying permission templates to the Guild Discussion channels, you MUST use the EXACT channel name as "targetName" and the mapped role name in "permissionOverwrites[].id":
+   1. Channel: "tech-and-engineering"   -> Role: "Tech & Engineering"
+   2. Channel: "business-and-strategy"  -> Role: "Business & Strategy"
+   3. Channel: "academia-and-research"  -> Role: "Academia & Education"
+   4. Channel: "legal-and-policy"       -> Role: "Law & Compliance"
+   5. Channel: "creatives-lounge"       -> Role: "Creative & Design"
+
+   CRITICAL CHANNEL VS ROLE TARGET RULES:
+   - "targetName" MUST ALWAYS resolve to an EXISTING Discord CHANNEL or CATEGORY.
+   - "permissionOverwrites[].id" represents the ROLE or USER receiving the overwrite.
+   - Do NOT use role names, role slugs, or role-derived slugs as targetName.
+   - Specifically:
+     - DO NOT use "academia-and-education" as targetName; the channel target is "academia-and-research" while the role is "Academia & Education".
+     - DO NOT use "law-and-compliance" as targetName; the channel target is "legal-and-policy" while the role is "Law & Compliance".
+     - DO NOT use "creative-and-design" as targetName; the channel target is "creatives-lounge" while the role is "Creative & Design".
+     - DO NOT use "Tech & Engineering" or "Business & Strategy" as targetName; the channel targets are "tech-and-engineering" and "business-and-strategy".
+   - "permissionOverwrites": array of { "id": role name/ID or "@everyone", "allow": [], "deny": [] }
+   - When role-gating a channel (denying "@everyone" ViewChannel):
+     CRITICAL ORDERING REQUIREMENT (to prevent bot self-lockout):
+     permissionOverwrites MUST ALWAYS be listed in this exact sequence:
+     1. KosmoBot (FIRST to guarantee bot access is never severed)
+     2. Kosmo Founder
+     3. Team Kosmo
+     4. Moderator
+     5. Target role(s) (e.g. "Tech & Engineering" or "Law & Compliance")
+     6. @everyone (LAST)
+     ALWAYS explicitly include allow entries for "KosmoBot", "Kosmo Founder", "Team Kosmo", and "Moderator" with allow: ["ViewChannel", "SendMessages", "ReadMessageHistory"], deny: [].
 
 EXAMPLES:
+
+Example of VALID role-gated channel permission template setup:
+{
+  "planName": "Configure Role-Gated Channels",
+  "explanation": "Configure #tech-and-engineering for Tech & Engineering role while preserving staff access",
+  "actions": [
+    {
+      "type": "applyPermissionTemplate",
+      "payload": {
+        "targetName": "tech-and-engineering",
+        "permissionOverwrites": [
+          {
+            "id": "KosmoBot",
+            "allow": ["ViewChannel", "SendMessages", "ReadMessageHistory"],
+            "deny": []
+          },
+          {
+            "id": "Kosmo Founder",
+            "allow": ["ViewChannel", "SendMessages", "ReadMessageHistory"],
+            "deny": []
+          },
+          {
+            "id": "Team Kosmo",
+            "allow": ["ViewChannel", "SendMessages", "ReadMessageHistory"],
+            "deny": []
+          },
+          {
+            "id": "Moderator",
+            "allow": ["ViewChannel", "SendMessages", "ReadMessageHistory"],
+            "deny": []
+          },
+          {
+            "id": "Tech & Engineering",
+            "allow": ["ViewChannel", "SendMessages", "ReadMessageHistory"],
+            "deny": []
+          },
+          {
+            "id": "@everyone",
+            "allow": [],
+            "deny": ["ViewChannel"]
+          }
+        ]
+      }
+    }
+  ]
+}
 
 Example of VALID output:
 {
@@ -248,7 +328,7 @@ export class NLManager {
       };
     }
 
-    if (!parsed || !Array.isArray(parsed.actions)) {
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.actions)) {
       return {
         success: false,
         explanation: 'AI response did not contain a valid actions array.',
@@ -289,6 +369,62 @@ export class NLManager {
           }
           if (typeof payload.memberId === 'string') {
             payload.memberId = payload.memberId.trim();
+          }
+        }
+        if (action.type === 'applyPermissionTemplate') {
+          if (!payload.targetName && payload.channelName) {
+            payload.targetName = payload.channelName;
+          }
+          if (!payload.targetName && payload.channel) {
+            payload.targetName = payload.channel;
+          }
+          if (typeof payload.targetName === 'string') {
+            payload.targetName = payload.targetName.trim();
+            if (payload.targetName.startsWith('#')) {
+              payload.targetName = payload.targetName.slice(1).trim();
+            }
+          }
+          if (Array.isArray(payload.permissionOverwrites)) {
+            const everyoneDeniesView = payload.permissionOverwrites.some(
+              (ow: any) =>
+                (ow.id === '@everyone' || ow.id === 'everyone') &&
+                Array.isArray(ow.deny) &&
+                ow.deny.some((p: string) => String(p).toLowerCase().includes('view'))
+            );
+            if (everyoneDeniesView) {
+              const staffRolesToPreserve = [
+                'KosmoBot',
+                'Kosmo Founder',
+                'Team Kosmo',
+                'Moderator',
+              ];
+              const staffPerms = ['ViewChannel', 'SendMessages', 'ReadMessageHistory'];
+              for (const sRole of staffRolesToPreserve) {
+                const alreadyPresent = payload.permissionOverwrites.some(
+                  (ow: any) =>
+                    typeof ow.id === 'string' &&
+                    (ow.id.toLowerCase() === sRole.toLowerCase() ||
+                      (sRole === 'Kosmo Founder' && ow.id.toLowerCase() === 'founder'))
+                );
+                if (!alreadyPresent) {
+                  payload.permissionOverwrites.push({
+                    id: sRole,
+                    allow: staffPerms,
+                    deny: [],
+                  });
+                }
+              }
+              // Enforce safe ordering for role-gated permission templates:
+              // 1. KosmoBot
+              // 2. Kosmo Founder
+              // 3. Team Kosmo
+              // 4. Moderator
+              // 5. target role(s)
+              // 6. @everyone LAST
+              payload.permissionOverwrites = orderPermissionOverwritesForRoleGating(
+                payload.permissionOverwrites
+              );
+            }
           }
         }
         return {
@@ -351,72 +487,11 @@ export class NLManager {
   }
 
   /**
-   * Safely extracts JSON from raw LLM output, stripping markdown formatting
-   * and conversational prose if present.
+   * Safely extracts JSON from raw LLM output, stripping reasoning/thinking tags,
+   * markdown formatting, and conversational prose if present.
    */
   public extractAndParseJSON(raw: string): any {
-    if (!raw || typeof raw !== 'string') {
-      throw new Error('Empty or invalid LLM response string.');
-    }
-
-    let text = raw.trim();
-
-    // 1. Check for markdown code fences first (```json ... ``` or ``` ... ```)
-    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (codeBlockMatch && codeBlockMatch[1]) {
-      const fenceContent = codeBlockMatch[1].trim();
-      try {
-        const parsed = JSON.parse(fenceContent);
-        if (Array.isArray(parsed)) {
-          return { actions: parsed };
-        }
-        return parsed;
-      } catch {
-        // If direct parse fails (e.g. trailing commas), continue to extractor using fenceContent
-        text = fenceContent;
-      }
-    }
-
-    // 2. Locate the outermost JSON object `{ ... }` or array `[ ... ]`
-    const firstBrace = text.indexOf('{');
-    const firstBracket = text.indexOf('[');
-
-    let startIndex = -1;
-    let endIndex = -1;
-
-    if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
-      startIndex = firstBrace;
-      endIndex = text.lastIndexOf('}');
-    } else if (firstBracket !== -1) {
-      startIndex = firstBracket;
-      endIndex = text.lastIndexOf(']');
-    }
-
-    if (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
-      const candidate = text.substring(startIndex, endIndex + 1).trim();
-      try {
-        const parsed = JSON.parse(candidate);
-        if (Array.isArray(parsed)) {
-          return { actions: parsed };
-        }
-        return parsed;
-      } catch (err: any) {
-        // Attempt to clean trailing commas before closing braces/brackets
-        try {
-          const cleaned = candidate.replace(/,\s*([}\]])/g, '$1');
-          const parsed = JSON.parse(cleaned);
-          if (Array.isArray(parsed)) {
-            return { actions: parsed };
-          }
-          return parsed;
-        } catch {
-          throw new Error(`Failed to parse extracted JSON block: ${err.message}`);
-        }
-      }
-    }
-
-    // 3. Fallback: try parsing directly
-    return JSON.parse(text);
+    return extractAndParseJSON(raw, { wrapBareArray: true });
   }
 
   /**
@@ -460,7 +535,9 @@ export class NLManager {
             model,
             messages: options.messages,
             temperature: options.temperature ?? 0.2,
-            max_tokens: options.max_tokens ?? 1024,
+            max_tokens: options.max_tokens ?? 2048,
+            response_format: { type: 'json_object' },
+            reasoning: { effort: 'none', exclude: true },
           }),
         });
 
@@ -499,30 +576,13 @@ export class NLManager {
         if (!response.ok) {
           const errorMessage =
             data?.error?.message ||
-            rawData ||
             response.statusText ||
             'Unknown OpenRouter API error';
 
           lastError = `OpenRouter API request failed [${response.status} ${response.statusText}]: ${errorMessage}`;
 
-          console.log(`[LLM DEBUG]
-provider=OpenRouter
-model=${model}
-attempt=${attempt}/${maxAttempts}
-status=${response.status}
-contentType=${contentType}
-errorType=http
-rawLength=${rawData.length}
-responsePreview=${rawData
-  .substring(0, 300)
-  .replace(/\r?\n/g, ' ')}`);
-
           // Retry temporary server/provider failures.
           if (response.status >= 500 && attempt < maxAttempts) {
-            console.log(
-              `[LLM DEBUG] Temporary HTTP failure. Retrying attempt ${attempt + 1}/${maxAttempts}...`
-            );
-
             continue;
           }
 
@@ -552,19 +612,6 @@ responsePreview=${rawData
 
           lastError = `OpenRouter upstream provider error${providerCode}: ${providerMessage}`;
 
-          console.log(`[LLM DEBUG]
-provider=OpenRouter
-model=${model}
-attempt=${attempt}/${maxAttempts}
-status=${response.status}
-contentType=${contentType}
-errorType=upstream-provider
-providerCode=${data.error.code ?? 'unknown'}
-rawLength=${rawData.length}
-responsePreview=${rawData
-  .substring(0, 300)
-  .replace(/\r?\n/g, ' ')}`);
-
           // Retry upstream 5xx/provider errors once.
           const providerErrorCode = Number(data.error.code);
 
@@ -573,10 +620,6 @@ responsePreview=${rawData
             providerErrorCode < 600 &&
             attempt < maxAttempts
           ) {
-            console.log(
-              `[LLM DEBUG] Upstream provider temporarily unavailable. Retrying attempt ${attempt + 1}/${maxAttempts}...`
-            );
-
             continue;
           }
 
@@ -589,26 +632,9 @@ responsePreview=${rawData
         const content =
           data?.choices?.[0]?.message?.content?.trim() ?? '';
 
-        console.log(`[LLM DEBUG]
-provider=OpenRouter
-model=${model}
-attempt=${attempt}/${maxAttempts}
-status=${response.status}
-contentType=${contentType}
-errorType=none
-rawLength=${rawData.length}
-contentLength=${content.length}
-responsePreview=${(content || rawData)
-  .substring(0, 300)
-  .replace(/\r?\n/g, ' ')}`);
-
         if (!content) {
           lastError =
             'OpenRouter returned a successful response but no LLM content was present.';
-
-          console.log(
-            `[LLM DEBUG] ${lastError}`
-          );
 
           // Don't blindly retry malformed successful responses twice.
           throw new Error(lastError);
@@ -626,10 +652,6 @@ responsePreview=${(content || rawData)
             lastError
           )
         ) {
-          console.log(
-            `[LLM DEBUG] Retrying after temporary LLM failure: ${lastError}`
-          );
-
           continue;
         }
 

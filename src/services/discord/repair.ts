@@ -7,6 +7,7 @@ import type {
   DesiredChannel,
   DesiredState,
   PermissionTemplate,
+  PermissionTemplateOverwrite,
 } from '../../types/desiredState';
 import type {
   AuditReport,
@@ -60,11 +61,11 @@ function normaliseOverwrites(
 
 /** Compare permission overwrite arrays */
 function overwritesEqual(
-  a: PermissionTemplate['overwrites'],
-  b: ChannelInfo['permissionOverwrites']
+  a: { id: string; allow?: string[]; deny?: string[] }[],
+  b: { id: string; allow?: string[]; deny?: string[] }[]
 ) {
-  const na = normaliseOverwrites(a as any);
-  const nb = normaliseOverwrites(b as any);
+  const na = normaliseOverwrites(a);
+  const nb = normaliseOverwrites(b);
 
   return JSON.stringify(na) === JSON.stringify(nb);
 }
@@ -236,7 +237,7 @@ export function generateRepairPlan(input: RepairInput): RepairResult {
           deny: ow.deny,
         };
       })
-      .filter((ow) => ow !== null) as any[];
+      .filter((ow): ow is PermissionTemplateOverwrite => ow !== null);
 
     if (
       targetChannel &&

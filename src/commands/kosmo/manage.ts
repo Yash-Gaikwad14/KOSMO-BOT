@@ -12,8 +12,17 @@ import { nlManager } from '../../services/discord/nl_manager';
 import { PlanService } from '../../services/discord/plan';
 import { runAudit } from '../../services/discord/audit';
 import { confirmAndExecutePlan, cancelPlan } from '../../services/discord/confirmation';
-import { authorize, Category } from '../../services/discord/policy';
+import { authorize, Category, extractUserRoleIds } from '../../services/discord/policy';
+export { extractUserRoleIds };
 import type { AuditReport } from '../../types/audit';
+import {
+  classifyIntent,
+  extractChannelTargets,
+  authorizeInspection,
+  inspectChannels,
+  formatInspectionReport,
+  loadDesiredState,
+} from '../../services/discord/inspect';
 
 export const data = new SlashCommandBuilder()
   .setName('kosmo')
@@ -57,6 +66,17 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     });
     return;
   }
+
+  // ── Read-Only Intent Detection ──────────────────────────────────────────
+  // Classify intent BEFORE invoking the LLM mutation planner.
+  // Read-only verification requests bypass the mutation pipeline entirely.
+  const intent = classifyIntent(instruction);
+
+  if (intent === 'READ_ONLY_INSPECT') {
+    return handleReadOnlyInspection(interaction, instruction);
+  }
+
+  // ── Mutation Path (existing behavior) ──────────────────────────────────
 
   // Extract role IDs using centralized helper
   const userRoleIds = extractUserRoleIds(interaction.member);
@@ -128,27 +148,6 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     embeds: [embed],
     components: [row],
   });
-}
-
-/**
- * Helper to extract role IDs from a GuildMember or API interaction member
- */
-export function extractUserRoleIds(member: any): string[] {
-  const userRoleIds: string[] = [];
-  if (member && 'roles' in member) {
-    const memberRoles = member.roles;
-    if (Array.isArray(memberRoles)) {
-      userRoleIds.push(...memberRoles.map(String));
-    } else if (typeof memberRoles === 'object' && 'cache' in memberRoles) {
-      const cache = (memberRoles as any).cache;
-      if (typeof cache?.map === 'function') {
-        userRoleIds.push(...cache.map((r: any) => r.id || r));
-      } else if (typeof cache?.values === 'function') {
-        userRoleIds.push(...Array.from(cache.values()).map((r: any) => r.id || r));
-      }
-    }
-  }
-  return userRoleIds;
 }
 
 /**
@@ -315,6 +314,75 @@ export async function handleConfirmationButton(interaction: ButtonInteraction): 
       components: [],
     });
   }
+}
+
+/**
+ * Handler for read-only channel inspection requests detected by intent classification.
+ *
+ * This path bypasses the mutation planner entirely. It:
+ * 1. Authorizes the user via the AUDIT policy category
+ * 2. Extracts channel targets from the instruction
+ * 3. Inspects those channels against guild state and desired-state config
+ * 4. Returns an ephemeral read-only report
+ *
+ * Zero Discord mutations occur in this path.
+ */
+async function handleReadOnlyInspection(
+  interaction: ChatInputCommandInteraction,
+  instruction: string
+): Promise<void> {
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: '❌ Read-only inspection can only be performed within a server (guild).',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // 1. Authorize using existing AUDIT policy (Moderator+ allowed)
+  const userRoleIds = extractUserRoleIds(interaction.member);
+  const authorized = authorizeInspection(userRoleIds, {
+    userId: interaction.user.id,
+    guildOwnerId: interaction.guild.ownerId,
+  });
+
+  if (!authorized) {
+    await interaction.reply({
+      content: '❌ **Unauthorized:** You do not have permission to perform channel inspections.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // 2. Extract channel targets
+  const targets = extractChannelTargets(instruction);
+
+  if (targets.length === 0) {
+    await interaction.reply({
+      content: '❌ **No channels specified.** Please mention channels to inspect (e.g. `check #start-here, #announcements`).',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // 3. Load desired state and inspect
+  const desiredState = loadDesiredState();
+  const report = inspectChannels(interaction.guild, targets, desiredState);
+
+  // 4. Format and send ephemeral response
+  const reportText = formatInspectionReport(report);
+
+  const embed = new EmbedBuilder()
+    .setTitle('🔍 Channel Inspection [READ-ONLY]')
+    .setDescription(reportText.substring(0, 4000))
+    .setColor(0x5865f2)
+    .setFooter({ text: 'Inspection Mode: STRICTLY READ-ONLY • No mutations performed' })
+    .setTimestamp();
+
+  await interaction.reply({
+    embeds: [embed],
+    ephemeral: true,
+  });
 }
 
 /**

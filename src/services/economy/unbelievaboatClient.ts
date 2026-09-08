@@ -20,6 +20,16 @@ export interface IUnbelievaBoatClient {
     amount: number,
     reason: string
   ): Promise<UnbelievaBoatResponse>;
+  getUserBalance(
+    guildId: string,
+    userId: string
+  ): Promise<UnbelievaBoatResponse>;
+  getGuildLeaderboard(
+    guildId: string,
+    sort?: 'total' | 'cash' | 'bank',
+    limit?: number,
+    page?: number
+  ): Promise<UnbelievaBoatResponse>;
 }
 
 export class UnbelievaBoatClient implements IUnbelievaBoatClient {
@@ -124,6 +134,208 @@ export class UnbelievaBoatClient implements IUnbelievaBoatClient {
           success: false,
           status: response.status,
           error: 'Target user or guild not found on economy service.',
+        };
+      }
+
+      if (response.status >= 500) {
+        return {
+          success: false,
+          status: response.status,
+          error: `Economy service encountered a server error (HTTP ${response.status}).`,
+        };
+      }
+
+      return {
+        success: false,
+        status: response.status,
+        error: `Economy service returned unexpected status HTTP ${response.status}.`,
+      };
+    } catch (networkErr: any) {
+      return {
+        success: false,
+        error: `Failed to connect to economy service: ${networkErr?.message || 'Network error'}`,
+      };
+    }
+  }
+
+  /**
+   * Retrieves the Sparks balance for a user in the specified guild via UnbelievaBoat API.
+   * Read-only: never mutates user balance.
+   *
+   * @param guildId Discord Guild ID
+   * @param userId Discord User ID
+   */
+  async getUserBalance(
+    guildId: string,
+    userId: string
+  ): Promise<UnbelievaBoatResponse> {
+    if (!this.apiKey) {
+      return {
+        success: false,
+        error: 'UnbelievaBoat API key is not configured.',
+      };
+    }
+
+    if (!guildId || !userId) {
+      return {
+        success: false,
+        error: 'Guild ID and User ID are required.',
+      };
+    }
+
+    const endpoint = `${this.baseUrl}/guilds/${encodeURIComponent(guildId)}/users/${encodeURIComponent(userId)}`;
+
+    try {
+      const response = await this.fetchFn(endpoint, {
+        method: 'GET',
+        headers: {
+          Authorization: this.apiKey,
+          Accept: 'application/json',
+        },
+      });
+
+      if (response.ok) {
+        let data: any = null;
+        try {
+          data = await response.json();
+        } catch {
+          data = null;
+        }
+
+        return {
+          success: true,
+          status: response.status,
+          data,
+        };
+      }
+
+      if (response.status === 429) {
+        return {
+          success: false,
+          status: 429,
+          error: 'Rate limit exceeded with economy service. Please try again in a few moments.',
+        };
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          success: false,
+          status: response.status,
+          error: 'Economy service authorization failed.',
+        };
+      }
+
+      if (response.status === 404) {
+        return {
+          success: false,
+          status: 404,
+          error: 'Target user or guild not found on economy service.',
+        };
+      }
+
+      if (response.status >= 500) {
+        return {
+          success: false,
+          status: response.status,
+          error: `Economy service encountered a server error (HTTP ${response.status}).`,
+        };
+      }
+
+      return {
+        success: false,
+        status: response.status,
+        error: `Economy service returned unexpected status HTTP ${response.status}.`,
+      };
+    } catch (networkErr: any) {
+      return {
+        success: false,
+        error: `Failed to connect to economy service: ${networkErr?.message || 'Network error'}`,
+      };
+    }
+  }
+
+  /**
+   * Retrieves the leaderboard for a guild via UnbelievaBoat API.
+   * Read-only: never mutates user balances.
+   *
+   * @param guildId Discord Guild ID
+   * @param sort Sort key: 'total' | 'cash' | 'bank' (default: 'total')
+   * @param limit Number of entries per page (default: 10)
+   * @param page Page number (default: 1)
+   */
+  async getGuildLeaderboard(
+    guildId: string,
+    sort: 'total' | 'cash' | 'bank' = 'total',
+    limit = 10,
+    page = 1
+  ): Promise<UnbelievaBoatResponse> {
+    if (!this.apiKey) {
+      return {
+        success: false,
+        error: 'UnbelievaBoat API key is not configured.',
+      };
+    }
+
+    if (!guildId) {
+      return {
+        success: false,
+        error: 'Guild ID is required.',
+      };
+    }
+
+    const queryParams = new URLSearchParams({
+      sort,
+      limit: String(limit),
+      page: String(page),
+    });
+
+    const endpoint = `${this.baseUrl}/guilds/${encodeURIComponent(guildId)}/leaderboard?${queryParams.toString()}`;
+
+    try {
+      const response = await this.fetchFn(endpoint, {
+        method: 'GET',
+        headers: {
+          Authorization: this.apiKey,
+          Accept: 'application/json',
+        },
+      });
+
+      if (response.ok) {
+        let data: any = null;
+        try {
+          data = await response.json();
+        } catch {
+          data = null;
+        }
+
+        return {
+          success: true,
+          status: response.status,
+          data,
+        };
+      }
+
+      if (response.status === 429) {
+        return {
+          success: false,
+          status: 429,
+          error: 'Rate limit exceeded with economy service. Please try again in a few moments.',
+        };
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          success: false,
+          status: response.status,
+          error: 'Economy service authorization failed.',
+        };
+      }
+
+      if (response.status === 404) {
+        return {
+          success: false,
+          status: 404,
+          error: 'Target guild not found on economy service.',
         };
       }
 

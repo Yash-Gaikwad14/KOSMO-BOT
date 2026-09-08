@@ -1,5 +1,49 @@
 import { Guild, GuildMember } from 'discord.js';
+import { findRole, findChannel, findCategory, slugify } from './lookup';
 import { DiscordAction, ValidationResult } from './types';
+
+/**
+ * Approved canonical mappings for Guild Discussion channels and roles.
+ */
+export const APPROVED_DISCUSSION_MAPPINGS = [
+  { channel: 'tech-and-engineering', role: 'Tech & Engineering' },
+  { channel: 'business-and-strategy', role: 'Business & Strategy' },
+  { channel: 'academia-and-research', role: 'Academia & Education' },
+  { channel: 'legal-and-policy', role: 'Law & Compliance' },
+  { channel: 'creatives-lounge', role: 'Creative & Design' },
+] as const;
+
+/**
+ * Checks whether a given string is a known role name or role-derived slug that cannot
+ * serve as a channel target.
+ */
+export function isRoleNameOrRoleDerivedSlug(name: string): boolean {
+  if (!name || typeof name !== 'string') return false;
+  const clean = name.startsWith('#') ? name.slice(1).trim().toLowerCase() : name.trim().toLowerCase();
+
+  // 1. Privileged role names & slugs
+  if (PRIVILEGED_ROLE_NAMES.some((p) => p.toLowerCase() === clean || slugify(p) === clean)) {
+    return true;
+  }
+
+  // 2. Canonical discussion roles:
+  for (const mapping of APPROVED_DISCUSSION_MAPPINGS) {
+    // Exact role name matches (e.g. "Academia & Education", "Tech & Engineering")
+    if (mapping.role.toLowerCase() === clean) {
+      return true;
+    }
+    // Role-derived slugs that DO NOT match the actual channel name
+    // (e.g. "academia-and-education" vs channel "academia-and-research",
+    //       "law-and-compliance" vs channel "legal-and-policy",
+    //       "creative-and-design" vs channel "creatives-lounge")
+    const roleSlug = slugify(mapping.role);
+    if (roleSlug === clean && mapping.channel !== clean) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 /**
  * List of role names that are considered privileged and must never be granted
@@ -7,6 +51,7 @@ import { DiscordAction, ValidationResult } from './types';
  * server (Founder, Team Kosmo, Moderator, Administrator).
  */
 export const PRIVILEGED_ROLE_NAMES = [
+  'Kosmo Founder',
   'Founder',
   'Team Kosmo',
   'Moderator',
@@ -14,6 +59,16 @@ export const PRIVILEGED_ROLE_NAMES = [
   'Owner',
   'Admin',
   'KosmoBot',
+];
+
+/**
+ * Premium entitlement role names (Phase 8) that must never be created,
+ * granted, or revoked by automated AI proposals.
+ */
+export const PREMIUM_ROLE_NAMES = [
+  'VIP',
+  'Pro',
+  'Max',
 ];
 
 /**
@@ -28,6 +83,10 @@ export const FORBIDDEN_PERMISSIONS = [
   'KICK_MEMBERS',
   'BanMembers',
   'BAN_MEMBERS',
+  'ManageRoles',
+  'MANAGE_ROLES',
+  'ManageChannels',
+  'MANAGE_CHANNELS',
 ];
 
 /**
@@ -215,6 +274,23 @@ export function validateAction(guild: Guild, action: DiscordAction): void {
       }
     }
   }
+
+  if (action.type === 'applyPermissionTemplate' && guild) {
+    const rawTarget = action.payload?.targetName?.trim() || '';
+    const cleanTarget = rawTarget.startsWith('#') ? rawTarget.slice(1).trim() : rawTarget;
+    const roleMatch = findRole(guild, cleanTarget);
+    const channelMatch = findChannel(guild, cleanTarget) ?? findCategory(guild, cleanTarget);
+    if (roleMatch && !channelMatch) {
+      throw new Error(
+        `Target "${rawTarget}" resolves to a role instead of a channel or category. applyPermissionTemplate targetName must be an existing channel or category.`
+      );
+    }
+    if (roleMatch && cleanTarget.toLowerCase() === roleMatch.name.toLowerCase()) {
+      throw new Error(
+        `Target "${rawTarget}" resolves to a role instead of a channel or category. applyPermissionTemplate targetName must be an existing channel or category.`
+      );
+    }
+  }
 }
 
 /**
@@ -246,6 +322,10 @@ export class PermissionValidator {
           blocked = true;
           blockedReasons.push(`Creation of privileged role is not allowed.`);
         }
+        if (PREMIUM_ROLE_NAMES.some((p) => p.toLowerCase() === lowerName)) {
+          blocked = true;
+          blockedReasons.push(`Creation of premium role is not allowed.`);
+        }
         break;
       }
 
@@ -255,6 +335,10 @@ export class PermissionValidator {
         if (PRIVILEGED_ROLE_NAMES.some((p) => p.toLowerCase() === lowerName)) {
           blocked = true;
           blockedReasons.push(`Assigning privileged role is not allowed.`);
+        }
+        if (PREMIUM_ROLE_NAMES.some((p) => p.toLowerCase() === lowerName)) {
+          blocked = true;
+          blockedReasons.push(`Assigning premium role is not allowed.`);
         }
         if (!roleName) {
           errors.push('Role name cannot be empty for assignment.');
@@ -272,6 +356,10 @@ export class PermissionValidator {
           blocked = true;
           blockedReasons.push(`Removing privileged role '${roleName}' is not allowed.`);
         }
+        if (PREMIUM_ROLE_NAMES.some((p) => p.toLowerCase() === lowerName)) {
+          blocked = true;
+          blockedReasons.push(`Removing premium role '${roleName}' is not allowed.`);
+        }
         if (!roleName) {
           errors.push('Role name cannot be empty for removal.');
         }
@@ -282,13 +370,31 @@ export class PermissionValidator {
       }
 
       case 'applyPermissionTemplate': {
-        const overwrites = action.payload.permissionOverwrites || [];
-        for (const ow of overwrites) {
-          const allows = ow.allow || [];
-          for (const perm of allows) {
-            if (FORBIDDEN_PERMISSIONS.includes(perm)) {
-              blocked = true;
-              blockedReasons.push(`Permission template cannot grant ${perm} permission.`);
+        const targetName = action.payload.targetName?.trim() || '';
+        if (!targetName) {
+          errors.push('Target channel or category name cannot be empty for permission template.');
+        }
+        const cleanTarget = targetName.startsWith('#') ? targetName.slice(1).trim() : targetName;
+        if (isRoleNameOrRoleDerivedSlug(cleanTarget)) {
+          blocked = true;
+          blockedReasons.push(
+            `Target "${targetName}" resolves to a role instead of a channel or category (is a role name, not a channel or category). applyPermissionTemplate targetName must be an existing channel or category.`
+          );
+        }
+        const overwrites = action.payload.permissionOverwrites;
+        if (!overwrites || !Array.isArray(overwrites) || overwrites.length === 0) {
+          errors.push('Permission template requires at least one permission overwrite.');
+        } else {
+          for (const ow of overwrites) {
+            if (!ow.id || typeof ow.id !== 'string' || !ow.id.trim()) {
+              errors.push('Permission overwrite requires a non-empty target id.');
+            }
+            const allows = ow.allow || [];
+            for (const perm of allows) {
+              if (FORBIDDEN_PERMISSIONS.includes(perm)) {
+                blocked = true;
+                blockedReasons.push(`Permission template cannot grant ${perm} permission.`);
+              }
             }
           }
         }
@@ -308,6 +414,10 @@ export class PermissionValidator {
         if (PRIVILEGED_ROLE_NAMES.some((p) => p.toLowerCase() === lowerName)) {
           blocked = true;
           blockedReasons.push(`Deletion of privileged role '${roleName}' is not allowed.`);
+        }
+        if (PREMIUM_ROLE_NAMES.some((p) => p.toLowerCase() === lowerName)) {
+          blocked = true;
+          blockedReasons.push(`Deletion of premium role '${roleName}' is not allowed.`);
         }
         if (!roleName) {
           errors.push('Role name cannot be empty for deletion.');
@@ -394,7 +504,8 @@ export class PermissionValidator {
       }
 
       default:
-        warnings.push(`Unrecognized action type: ${(action as any).type}`);
+        errors.push(`Unrecognized action type: ${(action as any)?.type}`);
+        warnings.push(`Unrecognized action type: ${(action as any)?.type}`);
     }
 
     return {
@@ -426,6 +537,141 @@ export class PermissionValidator {
 
     for (const action of actions) {
       const res = this.validateAction(action);
+      if (res.errors.length > 0) {
+        allErrors.push(...res.errors);
+      }
+      if (res.warnings && res.warnings.length > 0) {
+        allWarnings.push(...res.warnings);
+      }
+      if (res.blocked) {
+        isBlocked = true;
+        if (res.blockedReasons) {
+          allBlockedReasons.push(...res.blockedReasons);
+        }
+      }
+    }
+
+    return {
+      valid: allErrors.length === 0 && !isBlocked,
+      errors: allErrors,
+      warnings: allWarnings,
+      blocked: isBlocked,
+      blockedReasons: isBlocked ? allBlockedReasons : undefined,
+    };
+  }
+
+  /**
+   * Allowed Phase 9.8 action types for automated advisory proposals.
+   */
+  public static readonly PHASE_9_8_ALLOWED_ACTIONS = [
+    'createChannel',
+    'createRole',
+    'applyPermissionTemplate',
+    'assignRole',
+    'removeRole',
+  ] as const;
+
+  /**
+   * Strictly blocked Phase 9.8 action types for automated advisory proposals.
+   */
+  public static readonly PHASE_9_8_BLOCKED_ACTIONS = [
+    'deleteChannel',
+    'deleteCategory',
+    'deleteRole',
+    'timeoutMember',
+    'kickMember',
+    'banMember',
+    'purgeMessages',
+  ] as const;
+
+  /**
+   * Validates an individual action specifically for Community Action Proposals (Phase 9.8).
+   * Enforces action whitelist, blocked types, and sensitive target safety.
+   */
+  public static validateCommunityProposalAction(action: DiscordAction): ValidationResult {
+    if (!action || !action.type) {
+      return {
+        valid: false,
+        errors: ['Invalid or null action.'],
+        blocked: false,
+      };
+    }
+
+    // Check explicitly blocked types
+    if (this.PHASE_9_8_BLOCKED_ACTIONS.includes(action.type as any)) {
+      return {
+        valid: false,
+        errors: [`Action type "${action.type}" is prohibited in community action proposals.`],
+        blocked: true,
+        blockedReasons: [`Action type "${action.type}" is prohibited in community action proposals.`],
+      };
+    }
+
+    // Check whitelist
+    if (!this.PHASE_9_8_ALLOWED_ACTIONS.includes(action.type as any)) {
+      return {
+        valid: false,
+        errors: [`Unrecognized or disallowed action type for proposals: ${(action as any).type}`],
+        blocked: false,
+      };
+    }
+
+    // Check sensitive role targets for assignRole/removeRole/createRole
+    if (action.type === 'assignRole' || action.type === 'removeRole') {
+      const roleName = action.payload?.roleName?.trim() || '';
+      const lower = roleName.toLowerCase();
+      if (
+        PRIVILEGED_ROLE_NAMES.some((p) => p.toLowerCase() === lower) ||
+        PREMIUM_ROLE_NAMES.some((p) => p.toLowerCase() === lower)
+      ) {
+        return {
+          valid: false,
+          errors: [`Proposals cannot modify privileged or premium role "${roleName}".`],
+          blocked: true,
+          blockedReasons: [`Proposals cannot modify privileged or premium role "${roleName}".`],
+        };
+      }
+    }
+
+    if (action.type === 'createRole') {
+      const roleName = action.payload?.name?.trim() || '';
+      const lower = roleName.toLowerCase();
+      if (
+        PRIVILEGED_ROLE_NAMES.some((p) => p.toLowerCase() === lower) ||
+        PREMIUM_ROLE_NAMES.some((p) => p.toLowerCase() === lower)
+      ) {
+        return {
+          valid: false,
+          errors: [`Proposals cannot create privileged or premium role "${roleName}".`],
+          blocked: true,
+          blockedReasons: [`Proposals cannot create privileged or premium role "${roleName}".`],
+        };
+      }
+    }
+
+    return this.validateAction(action);
+  }
+
+  /**
+   * Validates a batch of actions for a Phase 9.8 Community Action Proposal.
+   */
+  public static validateCommunityProposalActions(actions: DiscordAction[]): ValidationResult {
+    const allErrors: string[] = [];
+    const allWarnings: string[] = [];
+    const allBlockedReasons: string[] = [];
+    let isBlocked = false;
+
+    if (!actions || actions.length === 0) {
+      return {
+        valid: false,
+        errors: ['Proposal contains no actions.'],
+        warnings: [],
+        blocked: false,
+      };
+    }
+
+    for (const action of actions) {
+      const res = this.validateCommunityProposalAction(action);
       if (res.errors.length > 0) {
         allErrors.push(...res.errors);
       }

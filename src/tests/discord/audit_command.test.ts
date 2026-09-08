@@ -197,6 +197,66 @@ describe('/kosmo audit command', () => {
     expect(embed.title).toContain('READ-ONLY');
   });
 
+  test('Test 3b: Non-owner with live Kosmo Founder role -> ALLOW audit', async () => {
+    const mockGuild = createMockGuild();
+    let repliedPayload: any = null;
+
+    const mockInteraction = {
+      options: {
+        getSubcommand: jest.fn().mockReturnValue('audit'),
+      },
+      guild: mockGuild,
+      user: {
+        id: 'aditya-founder-id',
+        username: 'AdityaFounder',
+      },
+      member: {
+        roles: ['1544750811207442532'], // Live Kosmo Founder role ID
+      },
+      reply: jest.fn().mockImplementation(async (payload) => {
+        repliedPayload = payload;
+      }),
+      followUp: jest.fn(),
+    } as unknown as ChatInputCommandInteraction;
+
+    await execute(mockInteraction);
+
+    expect(mockInteraction.reply).toHaveBeenCalledTimes(1);
+    expect(repliedPayload?.embeds).toBeDefined();
+    expect(repliedPayload.embeds).toHaveLength(1);
+    expect(repliedPayload.embeds[0].data.title).toContain('READ-ONLY');
+  });
+
+  test('Test 3c: Non-owner with live Team Kosmo role -> ALLOW audit', async () => {
+    const mockGuild = createMockGuild();
+    let repliedPayload: any = null;
+
+    const mockInteraction = {
+      options: {
+        getSubcommand: jest.fn().mockReturnValue('audit'),
+      },
+      guild: mockGuild,
+      user: {
+        id: 'anmol-team-id',
+        username: 'AnmolTeamKosmo',
+      },
+      member: {
+        roles: ['1544801399068434443'], // Live Team Kosmo role ID
+      },
+      reply: jest.fn().mockImplementation(async (payload) => {
+        repliedPayload = payload;
+      }),
+      followUp: jest.fn(),
+    } as unknown as ChatInputCommandInteraction;
+
+    await execute(mockInteraction);
+
+    expect(mockInteraction.reply).toHaveBeenCalledTimes(1);
+    expect(repliedPayload?.embeds).toBeDefined();
+    expect(repliedPayload.embeds).toHaveLength(1);
+    expect(repliedPayload.embeds[0].data.title).toContain('READ-ONLY');
+  });
+
   test('Test 4: Non-owner with no authorized role -> DENY with ephemeral error', async () => {
     const mockGuild = createMockGuild();
     let repliedPayload: any = null;

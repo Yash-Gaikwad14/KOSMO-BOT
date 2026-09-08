@@ -28,6 +28,16 @@ describe('Daily Sparks Service', () => {
         status: 200,
         data: { cash: 500 },
       } as UnbelievaBoatResponse),
+      getUserBalance: jest.fn().mockResolvedValue({
+        success: true,
+        status: 200,
+        data: { cash: 500, bank: 0, total: 500 },
+      } as UnbelievaBoatResponse),
+      getGuildLeaderboard: jest.fn().mockResolvedValue({
+        success: true,
+        status: 200,
+        data: [],
+      } as UnbelievaBoatResponse),
     };
   });
 
